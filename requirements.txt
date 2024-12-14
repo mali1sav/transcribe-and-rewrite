@@ -4,10 +4,8 @@ python-dotenv==1.0.0
 yt-dlp==2023.12.30
 ffmpeg-python==0.2.0
 pydub==0.25.1
-numpy
-tqdm
-termcolor
-pytube
 youtube-transcript-api==0.6.1
 requests==2.31.0
+numpy==1.26.2
+tqdm==4.66.1
 # you might also have to install ffmpeg on your system
