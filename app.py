@@ -114,10 +114,10 @@ Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'n
 First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
-
+* H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
 * Main content: Start with a brief introduction that includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcript[0]['url']}">{transcript[0]['source']}</a>'. Then introduce the topic and its significance for Thai crypto audiences. 
 
-* Use 3-7 distinct headings (H2) for the main content, with 2-3 paragraphs (or list items if more appropriate) under each heading.
+* Use 3-7 distinct and engaging headings (H2) for the main content, with 2-3 paragraphs (or list items if more appropriate) under each heading.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Summarise key points and implications without a heading.
 
@@ -126,7 +126,7 @@ First, write the following sections:
 * Image Prompt: In English, describe a scene that captures the article's essence, focus on only 1 or 2 objects. 
 
 After writing all the above sections, analyze the key points and generate these title options:
-* Title Options:
+* Title & H1 Options:
   1. News style: State the main news with a compelling hook (integrate primary keyword naturally)
   2. Question style: Ask an engaging question that addresses the main concern (integrate primary keyword naturally)
   3. Number style: Start with a number or statistic that captures attention (integrate primary keyword naturally)
@@ -283,13 +283,21 @@ def main():
     
     # Initialize OpenRouter client
     if 'openrouter_client' not in st.session_state:
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        if not openai_api_key:
-            st.error("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+        openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+        site_url = os.getenv('SITE_URL', 'https://transcribe-and-rewrite.streamlit.app')
+        site_name = os.getenv('SITE_NAME', 'Fast Transcriber')
+        
+        if not openrouter_api_key:
+            st.error("OpenRouter API key not found. Please set the OPENROUTER_API_KEY environment variable.")
             return
+            
         st.session_state.openrouter_client = AsyncOpenAI(
-            api_key=openai_api_key,
-            base_url="https://openrouter.ai/api/v1"
+            api_key=openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": site_url,
+                "X-Title": site_name
+            }
         )
         
     st.markdown("## Fast Transcriber", help="Generate articles from YouTube videos and web content")
