@@ -2,28 +2,24 @@ import os
 import tempfile
 import ffmpeg
 import numpy as np
+from pydub import AudioSegment
 
 def extract_and_split_audio(audio_file_path, chunk_duration_ms=60000):  # 60 seconds chunks
     """Extract audio from video and split into chunks"""
     try:
+        # Convert to WAV using pydub
+        audio = AudioSegment.from_file(audio_file_path)
+        audio = audio.set_channels(1).set_frame_rate(16000)  # Convert to mono 16kHz
+        
         # Create a temporary directory for chunks
         temp_dir = tempfile.mkdtemp()
         chunk_paths = []
         
-        # Get audio duration using ffprobe
-        probe = ffmpeg.probe(audio_file_path)
-        duration = float(probe['streams'][0]['duration'])
-        chunk_duration_s = chunk_duration_ms / 1000  # convert to seconds
-        
         # Split audio into chunks
-        for i in range(0, int(duration), int(chunk_duration_s)):
-            chunk_path = os.path.join(temp_dir, f'chunk_{i}.wav')
-            
-            # Extract chunk using ffmpeg
-            stream = ffmpeg.input(audio_file_path, ss=i, t=chunk_duration_s)
-            stream = ffmpeg.output(stream, chunk_path, acodec='pcm_s16le', ar=16000, ac=1)
-            ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
-            
+        for i in range(0, len(audio), chunk_duration_ms):
+            chunk = audio[i:i + chunk_duration_ms]
+            chunk_path = os.path.join(temp_dir, f'chunk_{i//chunk_duration_ms}.wav')
+            chunk.export(chunk_path, format='wav')
             chunk_paths.append(chunk_path)
         
         return chunk_paths

@@ -185,28 +185,15 @@ async def download_youtube_audio(url):
             output_path = temp_file.name
 
         ydl_opts = {
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
+            'format': 'bestaudio[ext=m4a]/bestaudio',  # Prefer m4a format
             'outtmpl': output_path,
             'progress_hooks': [update_progress],
             'quiet': True,
             'no_warnings': True,
-            'cookiesfrombrowser': ('chrome',),  # Try to use Chrome cookies
-            'extractor_args': {'youtube': {
-                'player_client': ['android'],  # Use android client
-                'player_skip': ['webpage', 'config'],  # Skip webpage download
-            }},
+            'extract_audio': True,
+            'audio_format': 'wav',
+            'audio_quality': '192K',
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
-            }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
