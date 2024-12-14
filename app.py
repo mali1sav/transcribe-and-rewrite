@@ -280,6 +280,17 @@ def main():
         st.session_state.article_generated = False
     if 'sources' not in st.session_state:
         st.session_state.sources = []
+    
+    # Initialize OpenRouter client
+    if 'openrouter_client' not in st.session_state:
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            st.error("OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.")
+            return
+        st.session_state.openrouter_client = AsyncOpenAI(
+            api_key=openai_api_key,
+            base_url="https://openrouter.ai/api/v1"
+        )
         
     st.markdown("## Fast Transcriber", help="Generate articles from YouTube videos and web content")
     
