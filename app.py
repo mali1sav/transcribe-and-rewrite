@@ -194,7 +194,19 @@ async def download_youtube_audio(url):
             'outtmpl': output_path,
             'progress_hooks': [update_progress],
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            'cookiesfrombrowser': ('chrome',),  # Try to use Chrome cookies
+            'extractor_args': {'youtube': {
+                'player_client': ['android'],  # Use android client
+                'player_skip': ['webpage', 'config'],  # Skip webpage download
+            }},
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -224,11 +236,19 @@ async def process_youtube_url(url, source_name, progress_placeholder):
             
         # First try to get transcript using YouTube API
         try:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-            # Combine all transcript pieces into one text
-            transcript_text = ' '.join([entry['text'] for entry in transcript_list])
-            progress_placeholder.progress(1.0, text=f"✅ Completed {source_name} using YouTube transcript")
-            return {"type": "youtube", "url": url, "source": source_name, "content": transcript_text}
+            # Try multiple language codes
+            for lang in ['en', 'en-US', 'en-GB']:
+                try:
+                    transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang])
+                    # Combine all transcript pieces into one text
+                    transcript_text = ' '.join([entry['text'] for entry in transcript_list])
+                    progress_placeholder.progress(1.0, text=f"✅ Completed {source_name} using YouTube transcript")
+                    return {"type": "youtube", "url": url, "source": source_name, "content": transcript_text}
+                except Exception:
+                    continue
+                    
+            # If we get here, no transcript was found in any language
+            raise NoTranscriptFound(video_id)
             
         except (NoTranscriptFound, TranscriptsDisabled) as e:
             progress_placeholder.warning(f"No YouTube transcript available for {source_name}. Falling back to audio download...")
@@ -248,7 +268,7 @@ async def process_youtube_url(url, source_name, progress_placeholder):
                 
             progress_placeholder.progress(1.0, text=f"✅ Completed {source_name}")
             return {"type": "youtube", "url": url, "source": source_name, "content": transcript}
-                
+            
     except Exception as e:
         progress_placeholder.error(f"Error processing {source_name}: {str(e)}")
         return None
