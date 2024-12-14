@@ -90,32 +90,46 @@ async def generate_article(transcript, keywords=None):
         return None
     
     # Process keywords
-    keyword_list = []
+    primary_keyword = ""
+    secondary_keywords = []
     if keywords:
         keyword_list = [k.strip() for k in keywords.split('\n') if k.strip()]
-    keyword_str = ', '.join(keyword_list) if keyword_list else 'no specific keywords'
+        if keyword_list:
+            primary_keyword = keyword_list[0]  # First keyword is primary
+            secondary_keywords = keyword_list[1:] if len(keyword_list) > 1 else []  # Rest are secondary
     
-    prompt = f"""Based on these transcripts, write a Thai crypto news article for WordPress. Use these keywords naturally throughout the article: {keyword_str}.
+    keyword_instruction = f"""Primary Keyword: {primary_keyword}
+This must appear naturally ONCE in Title, Meta Description, and H1. Do not force it if it doesn't fit naturally.
+
+Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'none'}
+- Only use these in H2 headings and paragraphs where they fit naturally
+- Each secondary keyword should appear no more than 2 times in the entire content
+- Do NOT use these in Title, Meta Description, or H1
+- Skip any secondary keywords that don't fit naturally in the context"""
+
+    prompt = f"""Based on these transcripts, write a Thai crypto news article for WordPress. Follow these keyword instructions:
+
+{keyword_instruction}
 
 First, write the following sections:
 
-* คำอธิบายเมต้า: Summarise the article in 160 characters in Thai.
+* Meta Description: Summarise the article in 160 characters in Thai.
 
 * Main content: Start with a brief introduction that includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcript[0]['url']}">{transcript[0]['source']}</a>'. Then introduce the topic and its significance for Thai crypto audiences. 
 
-* Use 4-7 distinct headings (H2-H6) for the main content, with 2-3 paragraphs (or list items if more appropriate) under each heading.
+* Use 3-7 distinct headings (H2) for the main content, with 2-3 paragraphs (or list items if more appropriate) under each heading.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Summarise key points and implications without a heading.
 
-* Excerpt for WordPress: Provide 1 sentence for a brief overview.
+* Excerpt for WordPress: In Thai, provide 1 sentence for a brief overview.
 
-* Image Prompt: Create a futuristic scene that captures the article's essence.
+* Image Prompt: In English, describe a scene that captures the article's essence, focus on only 1 or 2 objects. 
 
 After writing all the above sections, analyze the key points and generate these title options:
 * Title Options:
-  1. News style: State the main news with a compelling hook
-  2. Question style: Ask an engaging question that addresses the main concern
-  3. Number style: Start with a number or statistic that captures attention
+  1. News style: State the main news with a compelling hook (integrate primary keyword naturally)
+  2. Question style: Ask an engaging question that addresses the main concern (integrate primary keyword naturally)
+  3. Number style: Start with a number or statistic that captures attention (integrate primary keyword naturally)
 
 Here are the transcripts to base the article on:
 """
@@ -163,6 +177,33 @@ async def transcribe_chunk(client, audio_chunk_path):
     except Exception as e:
         st.error(f"Error transcribing chunk: {str(e)}")
         return ""
+
+async def download_youtube_audio(url):
+    """Download audio from YouTube video"""
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+            output_path = temp_file.name
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'outtmpl': output_path,
+            'progress_hooks': [update_progress],
+            'quiet': True,
+            'no_warnings': True
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+            
+        return output_path
+    except Exception as e:
+        st.error(f"Error downloading audio: {str(e)}")
+        return None
 
 async def process_youtube_url(url, source_name, progress_placeholder):
     """Process a YouTube URL to get transcription"""
