@@ -1,20 +1,16 @@
-# Fast Video Transcriber
+# Transcribe and Rewrite
 
-A Streamlit application that downloads YouTube videos and transcribes them using OpenAI's Whisper API.
+A Streamlit application that transcribes YouTube videos and generates article summaries using AI. The app supports both English and Thai languages.
 
 ## Features
 
-- Download audio from YouTube videos using yt-dlp
-- Transcribe audio using OpenAI's Whisper API
-- Clean and simple Streamlit interface
-- Automatic cleanup of temporary files
+- Fetch transcripts from YouTube videos
+- Support for multiple input sources (YouTube URLs and text)
+- Generate AI-powered article summaries
+- Download transcripts and generated articles
+- Supports English and Thai languages
 
-## Requirements
-
-- Python 3.8+
-- FFmpeg (system requirement)
-
-## Installation
+## Setup
 
 1. Clone the repository:
 ```bash
@@ -27,11 +23,15 @@ cd transcribe-and-rewrite
 pip install -r requirements.txt
 ```
 
-3. Create a `.env` file in the root directory with your API keys:
+3. Create a `.env` file based on `.env.example`:
 ```bash
 cp .env.example .env
 ```
-Then edit `.env` with your actual API keys.
+
+4. Add your OpenRouter API key to `.env`:
+```
+OPENROUTER_API_KEY=your_api_key_here
+```
 
 ## Usage
 
@@ -40,15 +40,19 @@ Then edit `.env` with your actual API keys.
 streamlit run app.py
 ```
 
-2. Enter a YouTube URL in the input field
-3. Click "Transcribe" to start the process
-4. The transcription will appear once complete
+2. Enter YouTube URLs or paste text content
+3. Add keywords to guide the article generation
+4. Select your preferred language (English or Thai)
+5. Click "Process Sources" to fetch transcripts
+6. Use "Generate Article" to create an AI-powered summary
+7. Download transcripts or generated articles using the provided buttons
 
-## Environment Variables
+## API Keys
 
-Required environment variables in `.env`:
-- `OPENAI_API_KEY`: Your OpenAI API key
-- `OPENROUTER_API_KEY`: Your OpenRouter API key (optional)
+This application uses the OpenRouter API for article generation. You'll need to:
+1. Sign up at [OpenRouter](https://openrouter.ai/)
+2. Get your API key from the dashboard
+3. Add it to your `.env` file
 
 ## License
 

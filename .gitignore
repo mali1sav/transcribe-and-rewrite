@@ -1,24 +1,28 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Environment
-.env
-.venv
-env/
+*.so
+.Python
 venv/
 ENV/
 
+# Temporary files
+temp/
+*.mp3
+*.wav
+*.m4a
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
 # Streamlit
 .streamlit/
-
-# OS
-.DS_Store
-
-# Project specific
-temp/
-downloads/
-*.wav
-*.mp3
-*.m4a
