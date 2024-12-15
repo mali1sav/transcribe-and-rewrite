@@ -1,92 +1,55 @@
-# Fast Transcriber
+# Fast Video Transcriber
 
-A Streamlit application that transcribes YouTube videos and web content, then generates well-structured articles in Thai. The app supports multiple sources including YouTube videos and webpage content.
+A Streamlit application that downloads YouTube videos and transcribes them using OpenAI's Whisper API.
 
 ## Features
 
-- **Multiple Source Support**:
-  - YouTube videos (with automatic transcript detection)
-  - Webpage URLs
-  - Direct text input
+- Download audio from YouTube videos using yt-dlp
+- Transcribe audio using OpenAI's Whisper API
+- Clean and simple Streamlit interface
+- Automatic cleanup of temporary files
 
-- **Smart Transcription**:
-  - Automatically uses YouTube's transcript when available
-  - Falls back to audio download and OpenAI transcription if needed
-  - Supports multiple languages
-
-- **Article Generation**:
-  - Generates structured Thai articles
-  - Creates engaging titles in multiple styles
-  - Includes meta descriptions and excerpts
-  - Properly attributes sources with hyperlinks
-
-## Prerequisites
+## Requirements
 
 - Python 3.8+
-- FFmpeg installed on your system
-- OpenAI API key
-- Streamlit account (for deployment)
+- FFmpeg (system requirement)
 
 ## Installation
 
 1. Clone the repository:
-   ```bash
-   git clone https://github.com/mali1sav/transcribe-and-rewrite.git
-   cd transcribe-and-rewrite
-   ```
+```bash
+git clone https://github.com/mali1sav/transcribe-and-rewrite.git
+cd transcribe-and-rewrite
+```
 
 2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-3. Install FFmpeg:
-   - **Mac**: `brew install ffmpeg`
-   - **Linux**: `sudo apt-get install ffmpeg`
-   - **Windows**: Download from [FFmpeg website](https://ffmpeg.org/download.html)
-
-4. Create a `.env` file in the project root:
-   ```env
-   OPENAI_API_KEY=your_openai_api_key_here
-   ```
+3. Create a `.env` file in the root directory with your API keys:
+```bash
+cp .env.example .env
+```
+Then edit `.env` with your actual API keys.
 
 ## Usage
 
 1. Run the Streamlit app:
-   ```bash
-   streamlit run app.py
-   ```
+```bash
+streamlit run app.py
+```
 
-2. Enter your sources:
-   - Add YouTube URLs and channel names
-   - Add webpage URLs or paste content directly
-   - Enter relevant keywords
+2. Enter a YouTube URL in the input field
+3. Click "Transcribe" to start the process
+4. The transcription will appear once complete
 
-3. Click "Process Sources" to start transcription
-4. Click "Generate Article" once processing is complete
-5. View and copy your generated article
+## Environment Variables
 
-## Configuration
-
-- Adjust text area sizes in `app.py`
-- Modify article generation prompts in the `generate_article` function
-- Customize the UI layout using Streamlit's column system
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+Required environment variables in `.env`:
+- `OPENAI_API_KEY`: Your OpenAI API key
+- `OPENROUTER_API_KEY`: Your OpenRouter API key (optional)
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [Streamlit](https://streamlit.io/) for the web framework
-- [OpenAI](https://openai.com/) for transcription and text generation
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) for YouTube video processing
-- [youtube-transcript-api](https://github.com/jdepoix/youtube-transcript-api) for YouTube transcript fetching
+MIT License
