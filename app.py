@@ -152,7 +152,7 @@ First, write the following sections:
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
 * Main content: Start with a strong opening that highlights the most newsworthy aspect of the video. Includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
 
-* Use 3-7 distinct and engaging headings (H2) for the main content. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. 
+* Use 3-8 distinct and engaging headings (H2) for the main content. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. 
 * For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors. If relevant, include direct quotes or specific data points from the transcript to add credibility.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Summarise key points and implications without a heading.
@@ -180,7 +180,7 @@ Here are the transcripts to base the article on:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=4000
+            max_tokens=5000
         )
         
         # Access the response content using the new API format
