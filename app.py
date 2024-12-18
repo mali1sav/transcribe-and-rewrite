@@ -142,7 +142,7 @@ Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'n
 - Do NOT use these in Title, Meta Description, or H1
 - Skip any secondary keywords that don't fit naturally in the context"""
 
-        prompt = f"""Based on these transcripts, write a Thai crypto news article for WordPress. Follow these keyword instructions:
+        prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
 
 {keyword_instruction}
 
@@ -150,9 +150,10 @@ First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a brief introduction that includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. Then introduce the topic and its significance for Thai crypto audiences. 
+* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video. Includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
 
-* Use 3-7 distinct and engaging headings (H2) for the main content, with 2-3 paragraphs (or list items if more appropriate) under each heading.
+* Use 3-7 distinct and engaging headings (H2) for the main content. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. 
+* For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors. If relevant, include direct quotes or specific data points from the transcript to add credibility.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Summarise key points and implications without a heading.
 
