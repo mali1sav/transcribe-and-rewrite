@@ -117,7 +117,7 @@ def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, chan
         logger.error(f"Error processing sources: {str(e)}")
         return []
 
-def generate_article(client: OpenAI, transcripts, keywords=None, language=None):
+def generate_article(client: OpenAI, transcripts, keywords=None, language=None, angle=None, section_count=3):
     """Generate article from transcripts using OpenRouter"""
     if not Config.OPENROUTER_API_KEY:
         st.error("OpenRouter API key not found in environment variables")
@@ -135,14 +135,31 @@ def generate_article(client: OpenAI, transcripts, keywords=None, language=None):
 
         keyword_instruction = f"""Primary Keyword: {primary_keyword}
 This must appear naturally ONCE in Title, Meta Description, and H1. Do not force it if it doesn't fit naturally.
-
+Use primary keyword in the rest of the article 2-3 more times.
 Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'none'}
 - Only use these in H2 headings and paragraphs where they fit naturally
-- Each secondary keyword should appear no more than 2 times in the entire content
-- Do NOT use these in Title, Meta Description, or H1
+- Each secondary keyword should appear 3-5 times in the entire content
+- Only use these in Title, Meta Description, or H1 if they can fit in naturally.
 - Skip any secondary keywords that don't fit naturally in the context"""
 
-        prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
+        # Add angle instruction
+        angle_instruction = ""
+        if angle:
+            angle_instruction = f"""
+Main Article Angle: {angle}
+- Focus the article's perspective and analysis primarily through this lens
+- Ensure all sections contribute to or relate back to this main angle
+- Prioritize information and insights that are most relevant to this perspective
+- Structure the article to build a coherent narrative around this angle"""
+
+        # Add attribution based on source type
+        attribution = ""
+        if transcripts and transcripts[0]['url']:
+            attribution = f"Use this format for attribution: '<a href=\"{transcripts[0]['url']}\">{transcripts[0]['source']}</a>'"
+        elif transcripts:
+            attribution = f"Source: {transcripts[0]['source']}"
+
+        prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. {angle_instruction} Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
 
 {keyword_instruction}
 
@@ -150,22 +167,22 @@ First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video. Includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
+* Main content: Start with a strong opening that highlights the most newsworthy aspect, specifically focusing on the chosen angle. {attribution if attribution else ""}
 
-* Use 3-8 distinct and engaging headings (H2) for the main content. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. 
-* For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors. If relevant, include direct quotes or specific data points from the transcript to add credibility.
+* Create exactly {section_count} distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
+* For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
-* บทสรุป: Summarise key points and implications without a heading.
+* บทสรุป: Summarise key points and implications without a heading, emphasizing insights related to the main angle.
 
 * Excerpt for WordPress: In Thai, provide 1 sentence for a brief overview.
 
-* Image Prompt: In English, describe a scene that captures the article's essence, focus on only 1 or 2 objects. 
+* Image Prompt: In English, describe a scene that captures the article's essence and chosen angle, focus on only 1 or 2 objects. 
 
 After writing all the above sections, analyze the key points and generate these title options:
 * Title & H1 Options:
-  1. News style: State the main news with a compelling hook (integrate primary keyword naturally)
-  2. Question style: Ask an engaging question that addresses the main concern (integrate primary keyword naturally)
-  3. Number style: Start with a number or statistic that captures attention (integrate primary keyword naturally)
+  1. News style: State the main news with a compelling hook (integrate primary keyword and angle naturally)
+  2. Question style: Ask an engaging question that addresses the main concern (integrate primary keyword and angle naturally)
+  3. Number style: Start with a number or statistic that captures attention (integrate primary keyword and angle naturally)
 
 Here are the transcripts to base the article on:
 """
@@ -176,7 +193,7 @@ Here are the transcripts to base the article on:
         completion = client.chat.completions.create(
             model="openai/gpt-4o-2024-11-20",
             messages=[
-                {"role": "system", "content": "You are an expert Thai technology journalist."},
+                {"role": "system", "content": "You are an expert Thai crypto journalist. You know everything about crypto and cryptotrading. You know how to write and structure articles for crypto news sites."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
@@ -209,18 +226,9 @@ def main():
     if 'channel2' not in st.session_state:
         st.session_state.channel2 = ""
     if 'text_content' not in st.session_state:
-        default_text = """Bitcoin has gained significant attention as a potential reserve asset:
-
-1. El Salvador: First country to adopt Bitcoin as legal tender
-2. United States: Discussions about strategic Bitcoin reserve
-3. Japan: Lawmakers considering national Bitcoin reserve
-4. UAE: Exploring Bitcoin for reserves
-5. Brazil: Proposed bill for sovereign Bitcoin reserve
-
-These discussions reflect growing interest in Bitcoin as a national reserve asset."""
-        st.session_state.text_content = default_text
+        st.session_state.text_content = ""
     if 'text_source' not in st.session_state:
-        st.session_state.text_source = "X.com"
+        st.session_state.text_source = ""
     if 'transcripts' not in st.session_state:
         st.session_state.transcripts = []
     if 'article' not in st.session_state:
@@ -298,14 +306,27 @@ These discussions reflect growing interest in Bitcoin as a national reserve asse
                 lang_col, key_col = st.columns([1, 3])
                 with lang_col:
                     language = st.selectbox(
-                        "Language",
-                        options=["Thai", "English"],
+                        "Input Language",
+                        options=["English", "Thai"],
                         index=0,
                         key="language"
                     )
                 with key_col:
-                    keywords = st.text_area("Keywords (one per line)", value=st.session_state.keywords, height=70, key="keywords")
+                    keywords = st.text_area("Keywords (one per line, first keyword is primary)", 
+                          help="Enter keywords, one per line. The first keyword will be used as the primary keyword.", value=st.session_state.keywords, height=70, key="keywords")
                 
+                # Add angle input
+                angle = st.text_input("Article Angle", 
+                         help="Enter the main perspective or angle you want the article to focus on (e.g., 'Impact on retail investors', 'Technical analysis perspective', 'Regulatory implications')", key="angle")
+
+                # Add section count input
+                section_count = st.number_input("Number of Content Sections", 
+                                              min_value=1, 
+                                              max_value=10, 
+                                              value=3, 
+                                              help="Specify how many main content sections (H2 headings) you want in the article",
+                                              key="section_count")
+
                 # YouTube inputs in more compact rows
                 yt1_col1, yt1_col2, yt1_col3 = st.columns([5, 2, 0.5])
                 with yt1_col1:
@@ -326,7 +347,7 @@ These discussions reflect growing interest in Bitcoin as a national reserve asse
                 # Text input in a more compact layout
                 text_col1, text_col2, text_col3 = st.columns([5, 2, 0.5])
                 with text_col1:
-                    text_content = st.text_area("Text Content", value=st.session_state.text_content, height=300, key="text_content", label_visibility="collapsed", placeholder="Or paste text content")
+                    text_content = st.text_area("Text Content", value=st.session_state.text_content, height=200, key="text_content", label_visibility="collapsed", placeholder="Or paste text content")
                 with text_col2:
                     text_source = st.text_input("Source", value=st.session_state.text_source, key="text_source", label_visibility="collapsed", placeholder="Text Source")
                 with text_col3:
@@ -354,7 +375,42 @@ These discussions reflect growing interest in Bitcoin as a national reserve asse
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Generate Article", type="primary", key="generate_btn", use_container_width=True):
-                        generate_clicked()
+                        st.session_state.generating = True
+
+                        # Process text content if provided
+                        if text_content.strip():
+                            text_transcript = {
+                                'content': text_content,
+                                'source': text_source if text_source else "User Input",
+                                'url': ""  # Empty URL for pasted text
+                            }
+                            st.session_state.transcripts = [text_transcript]
+                        
+                        # Process YouTube URLs if no text content
+                        elif yt_url1 or yt_url2:
+                            transcripts = []
+                            
+                            if yt_url1:
+                                transcript1 = process_sources(TranscriptFetcher(), yt_url1, channel1 if channel1 else "YouTube", "", "", "", "", language)
+                                if transcript1:
+                                    transcripts.extend(transcript1)
+                            
+                            if yt_url2:
+                                transcript2 = process_sources(TranscriptFetcher(), "", "", yt_url2, channel2 if channel2 else "YouTube", "", "", language)
+                                if transcript2:
+                                    transcripts.extend(transcript2)
+                            
+                            if transcripts:
+                                st.session_state.transcripts = transcripts
+                            else:
+                                st.error("No valid transcripts found from the provided URLs")
+                                st.session_state.generating = False
+                                return
+                        else:
+                            st.error("Please provide either text content or YouTube URLs")
+                            st.session_state.generating = False
+                            return
+
                 with col2:
                     combined_text = "\n\n".join([f"=== {t['source']} ===\n{t['content']}" for t in st.session_state.transcripts])
                     st.download_button(
@@ -368,7 +424,7 @@ These discussions reflect growing interest in Bitcoin as a national reserve asse
             # Generate article when button is clicked
             if getattr(st.session_state, 'generating', False):
                 with st.spinner("Generating article..."):
-                    article = generate_article(client, st.session_state.transcripts, keywords=keywords, language=language)
+                    article = generate_article(client, st.session_state.transcripts, keywords, language, angle, section_count)
                     if article:
                         st.session_state.article = article
                     else:
