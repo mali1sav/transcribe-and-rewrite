@@ -135,11 +135,11 @@ def generate_article(client: OpenAI, transcripts, keywords=None, language=None, 
 
         keyword_instruction = f"""Primary Keyword: {primary_keyword}
 This must appear naturally ONCE in Title, Meta Description, and H1. Do not force it if it doesn't fit naturally.
-Use primary keyword in the rest of the article 2-3 more times.
+
 Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'none'}
 - Only use these in H2 headings and paragraphs where they fit naturally
-- Each secondary keyword should appear 3-5 times in the entire content
-- Only use these in Title, Meta Description, or H1 if they can fit in naturally.
+- Each secondary keyword should appear no more than 2 times in the entire content
+- Do NOT use these in Title, Meta Description, or H1
 - Skip any secondary keywords that don't fit naturally in the context"""
 
         # Add angle instruction
@@ -152,13 +152,6 @@ Main Article Angle: {angle}
 - Prioritize information and insights that are most relevant to this perspective
 - Structure the article to build a coherent narrative around this angle"""
 
-        # Add attribution based on source type
-        attribution = ""
-        if transcripts and transcripts[0]['url']:
-            attribution = f"Use this format for attribution: '<a href=\"{transcripts[0]['url']}\">{transcripts[0]['source']}</a>'"
-        elif transcripts:
-            attribution = f"Source: {transcripts[0]['source']}"
-
         prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. {angle_instruction} Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
 
 {keyword_instruction}
@@ -167,7 +160,7 @@ First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a strong opening that highlights the most newsworthy aspect, specifically focusing on the chosen angle. {attribution if attribution else ""}
+* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video, specifically focusing on the chosen angle. Includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
 
 * Create exactly {section_count} distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
 * For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
@@ -193,7 +186,7 @@ Here are the transcripts to base the article on:
         completion = client.chat.completions.create(
             model="openai/gpt-4o-2024-11-20",
             messages=[
-                {"role": "system", "content": "You are an expert Thai crypto journalist. You know everything about crypto and cryptotrading. You know how to write and structure articles for crypto news sites."},
+                {"role": "system", "content": "You are an expert Thai technology journalist."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
@@ -306,9 +299,9 @@ def main():
                 lang_col, key_col = st.columns([1, 3])
                 with lang_col:
                     language = st.selectbox(
-                        "Input Language",
-                        options=["English", "Thai"],
-                        index=0,
+                        "Language",
+                        options=["Thai", "English"],
+                        index=1,
                         key="language"
                     )
                 with key_col:
@@ -375,42 +368,7 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Generate Article", type="primary", key="generate_btn", use_container_width=True):
-                        st.session_state.generating = True
-
-                        # Process text content if provided
-                        if text_content.strip():
-                            text_transcript = {
-                                'content': text_content,
-                                'source': text_source if text_source else "User Input",
-                                'url': ""  # Empty URL for pasted text
-                            }
-                            st.session_state.transcripts = [text_transcript]
-                        
-                        # Process YouTube URLs if no text content
-                        elif yt_url1 or yt_url2:
-                            transcripts = []
-                            
-                            if yt_url1:
-                                transcript1 = process_sources(TranscriptFetcher(), yt_url1, channel1 if channel1 else "YouTube", "", "", "", "", language)
-                                if transcript1:
-                                    transcripts.extend(transcript1)
-                            
-                            if yt_url2:
-                                transcript2 = process_sources(TranscriptFetcher(), "", "", yt_url2, channel2 if channel2 else "YouTube", "", "", language)
-                                if transcript2:
-                                    transcripts.extend(transcript2)
-                            
-                            if transcripts:
-                                st.session_state.transcripts = transcripts
-                            else:
-                                st.error("No valid transcripts found from the provided URLs")
-                                st.session_state.generating = False
-                                return
-                        else:
-                            st.error("Please provide either text content or YouTube URLs")
-                            st.session_state.generating = False
-                            return
-
+                        generate_clicked()
                 with col2:
                     combined_text = "\n\n".join([f"=== {t['source']} ===\n{t['content']}" for t in st.session_state.transcripts])
                     st.download_button(
