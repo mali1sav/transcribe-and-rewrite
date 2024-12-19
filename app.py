@@ -209,11 +209,11 @@ Here are the transcripts to base the article on:
 def main():
     # Initialize session state for input fields if not exists
     if 'keywords' not in st.session_state:
-        st.session_state.keywords = "Bitcoin\nราคา BTC"
+        st.session_state.keywords = "Bitcoin\nBTC"
     if 'yt_url1' not in st.session_state:
-        st.session_state.yt_url1 = "https://www.youtube.com/watch?v=QfgiMhP-PlU"
+        st.session_state.yt_url1 = "https://www.youtube.com/watch?v=dW2KZDucujw"
     if 'channel1' not in st.session_state:
-        st.session_state.channel1 = "ช่อง Youtube"
+        st.session_state.channel1 = "InvestAnswers"
     if 'yt_url2' not in st.session_state:
         st.session_state.yt_url2 = ""
     if 'channel2' not in st.session_state:
@@ -222,6 +222,8 @@ def main():
         st.session_state.text_content = ""
     if 'text_source' not in st.session_state:
         st.session_state.text_source = ""
+    if 'angle' not in st.session_state:
+        st.session_state.angle = "Bitcoin Situation Analysis"
     if 'transcripts' not in st.session_state:
         st.session_state.transcripts = []
     if 'article' not in st.session_state:
@@ -288,7 +290,7 @@ def main():
 
     # Streamlit UI - moved title inside container for better spacing
     with st.container():
-        st.title("Video Transcriber")
+        st.title("Transcribe and Rewrite")
         # Layout optimization - use columns for better space usage
         input_col, output_col = st.columns([1, 1])
 
@@ -310,14 +312,14 @@ def main():
                 
                 # Add angle input
                 angle = st.text_input("Article Angle", 
-                         help="Enter the main perspective or angle you want the article to focus on (e.g., 'Impact on retail investors', 'Technical analysis perspective', 'Regulatory implications')", key="angle")
+                         help="If video lack focus or has multiple topics, enter the main angle you want the article to focus on (e.g., 'BTC situation analysis', 'ETH Technical analysis', 'Regulatory implications')", value=st.session_state.angle, key="angle")
 
                 # Add section count input
                 section_count = st.number_input("Number of Content Sections", 
                                               min_value=1, 
                                               max_value=10, 
-                                              value=3, 
-                                              help="Specify how many main content sections (H2 headings) you want in the article",
+                                              value=4, 
+                                              help="Specify how many H2 sections you want in the article. If the video length is 12-15 mins, consider 2-3 sections. If it's longer than 20-30 mins, consider 4-5 sections.",
                                               key="section_count")
 
                 # YouTube inputs in more compact rows
