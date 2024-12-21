@@ -71,77 +71,103 @@ class TranscriptFetcher:
             return None
 
 def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, text_content, text_source, language):
-    """Process all sources synchronously"""
-    try:
-        transcripts = []
+    """Process all sources synchronously with retry logic"""
+    MAX_RETRIES = 3
+    transcripts = []
+    sources_to_process = []
+    
+    # Prepare sources to process
+    if yt_url1 and channel1:
+        sources_to_process.append({"url": yt_url1, "channel": channel1})
+    if yt_url2 and channel2:
+        sources_to_process.append({"url": yt_url2, "channel": channel2})
 
-        # Process YouTube URL 1
-        if yt_url1 and channel1:
-            with st.spinner(f"Processing {channel1}..."):
-                transcript = fetcher.get_transcript(yt_url1, language)
-                if transcript:
-                    transcripts.append({
-                        'source': channel1,
-                        'url': yt_url1,
-                        'content': transcript['text']
-                    })
-                    st.success(f"✅ Completed {channel1}")
-                else:
-                    st.error(f"Failed to get transcript for {channel1}")
+    # Track processed sources
+    processed_sources = set()
+    retry_count = 0
 
-        # Process YouTube URL 2
-        if yt_url2 and channel2:
-            with st.spinner(f"Processing {channel2}..."):
-                transcript = fetcher.get_transcript(yt_url2, language)
-                if transcript:
-                    transcripts.append({
-                        'source': channel2,
-                        'url': yt_url2,
-                        'content': transcript['text']
-                    })
-                    st.success(f"✅ Completed {channel2}")
-                else:
-                    st.error(f"Failed to get transcript for {channel2}")
+    while sources_to_process and retry_count < MAX_RETRIES:
+        retry_count += 1
+        failed_sources = []
 
-        # Process direct text input
-        if text_content and text_source:
-            transcripts.append({
-                'source': text_source,
-                'content': text_content
-            })
-            st.success(f"✅ Added text from {text_source}")
+        for source in sources_to_process:
+            if source["url"] in processed_sources:
+                continue
 
-        return transcripts
+            with st.spinner(f"Processing {source['channel']} (Attempt {retry_count}/{MAX_RETRIES})..."):
+                try:
+                    transcript = fetcher.get_transcript(source["url"], language)
+                    if transcript:
+                        transcripts.append({
+                            'source': source['channel'],
+                            'url': source['url'],
+                            'content': transcript['text']
+                        })
+                        processed_sources.add(source["url"])
+                        st.success(f"✅ Completed {source['channel']}")
+                    else:
+                        failed_sources.append(source)
+                        st.warning(f"⚠️ Failed to get transcript for {source['channel']} - Will retry")
+                except Exception as e:
+                    logger.error(f"Error processing {source['channel']}: {str(e)}")
+                    failed_sources.append(source)
+                    st.warning(f"⚠️ Error processing {source['channel']} - Will retry")
 
-    except Exception as e:
-        logger.error(f"Error processing sources: {str(e)}")
-        return []
+        sources_to_process = failed_sources
+        if failed_sources:
+            if retry_count < MAX_RETRIES:
+                st.info(f"Retrying failed transcriptions... ({retry_count}/{MAX_RETRIES})")
+            else:
+                for source in failed_sources:
+                    st.error(f"❌ Failed to get transcript for {source['channel']} after {MAX_RETRIES} attempts")
+
+    # Process direct text input
+    if text_content and text_source:
+        transcripts.append({
+            'source': text_source,
+            'content': text_content
+        })
+        st.success(f"✅ Added text from {text_source}")
+
+    return transcripts
 
 def generate_article(client: OpenAI, transcripts, keywords=None, language=None, angle=None, section_count=3):
     """Generate article from transcripts using OpenRouter"""
-    if not Config.OPENROUTER_API_KEY:
-        st.error("OpenRouter API key not found in environment variables")
-        return None
-
     try:
-        # Process keywords
-        primary_keyword = ""
-        secondary_keywords = []
+        if not transcripts:
+            return None
+
+        # Process keywords properly
+        keyword_list = []
         if keywords:
             keyword_list = [k.strip() for k in keywords.split('\n') if k.strip()]
-            if keyword_list:
-                primary_keyword = keyword_list[0]
-                secondary_keywords = keyword_list[1:] if len(keyword_list) > 1 else []
+        
+        # Get the primary keyword (first keyword)
+        primary_keyword = keyword_list[0].upper() if keyword_list else ""
+        
+        # Define shortcode mapping
+        shortcode_map = {
+            "BITCOIN": '[latest_articles label="ข่าว Bitcoin (BTC) ล่าสุด" count_of_posts="6" taxonomy="category" term_id="7"]',
+            "ETHEREUM": '[latest_articles label="ข่าว Ethereum ล่าสุด" count_of_posts="6" taxonomy="category" term_id="8"]',
+            "SOLANA": '[latest_articles label="ข่าว Solana ล่าสุด" count_of_posts="6" taxonomy="category" term_id="501"]',
+            "XRP": '[latest_articles label="ข่าว XRP ล่าสุด" count_of_posts="6" taxonomy="category" term_id="502"]',
+            "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
+        }
 
-        keyword_instruction = f"""Primary Keyword: {primary_keyword}
-This must appear naturally ONCE in Title, Meta Description, and H1. Do not force it if it doesn't fit naturally.
-
-Secondary Keywords: {', '.join(secondary_keywords) if secondary_keywords else 'none'}
-- Only use these in H2 headings and paragraphs where they fit naturally
-- Each secondary keyword should appear no more than 2 times in the entire content
-- Do NOT use these in Title, Meta Description, or H1
-- Skip any secondary keywords that don't fit naturally in the context"""
-
+        # Format keywords for the prompt
+        keyword_instruction = """Primary Keyword Optimization:
+Primary Keyword: {}
+This must appear naturally ONCE in Title, Meta Description, and H1.
+Use this in H2 headings and paragraphs where they fit naturally.
+Secondary Keywords: {}
+- Use these in H2 headings and paragraphs where they fit naturally
+- Each secondary keyword should appear no more than 5 times in the entire content
+- Only use these in Title, Meta Description, or H1 if they fit naturally.
+- Skip any secondary keywords that don't fit naturally in the context""".format(
+    keyword_list[0] if keyword_list else "",
+    ', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'
+)
+        
         # Add angle instruction
         angle_instruction = ""
         if angle:
@@ -160,12 +186,12 @@ First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video, specifically focusing on the chosen angle. Includes a concise attribution to the source videos. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
+* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video, specifically focusing on the chosen angle. Includes a concise attribution to the source videos. Recognise the speaker names if possible. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
 
 * Create exactly {section_count} distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
 * For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
-* บทสรุป: Summarise key points and implications without a heading, emphasizing insights related to the main angle.
+* บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights related to the main angle.
 
 * Excerpt for WordPress: In Thai, provide 1 sentence for a brief overview.
 
@@ -182,20 +208,47 @@ Here are the transcripts to base the article on:
         for transcript_item in transcripts:
             prompt += f"### Transcript from {transcript_item['source']}\n{transcript_item['content']}\n\n"
 
-        # Using the new OpenAI API format via OpenRouter
         completion = client.chat.completions.create(
-            model="openai/gpt-4o-2024-11-20",
-            messages=[
-                {"role": "system", "content": "You are an expert Thai technology journalist."},
-                {"role": "user", "content": prompt}
-            ],
+            model="openai/gpt-4-turbo",
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=5000
+            max_tokens=3500,  # Increased to ensure we get all content including titles
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
         )
         
         # Access the response content using the new API format
         if completion.choices and len(completion.choices) > 0:
-            return completion.choices[0].message.content
+            content = completion.choices[0].message.content
+            
+            # Add the appropriate shortcode based on primary keyword before the Excerpt section
+            shortcode = shortcode_map.get(primary_keyword, "")
+            if shortcode:
+                # First split at "Title & H1 Options:" to preserve it at the end
+                title_parts = content.split("Title & H1 Options:", 1)
+                if len(title_parts) == 2:
+                    main_content = title_parts[0]
+                    title_content = "Title & H1 Options:" + title_parts[1]
+                    
+                    # Then split main content at "Excerpt for WordPress:"
+                    parts = main_content.split("Excerpt for WordPress:", 1)
+                    if len(parts) == 2:
+                        # Reconstruct with shortcode and titles
+                        content = (parts[0].rstrip() + "\n\n" + shortcode + 
+                                 "\n\n----------------\n\n" + "Excerpt for WordPress:" + 
+                                 parts[1].rstrip() + "\n\n" + title_content)
+                    else:
+                        content = main_content.rstrip() + "\n\n" + shortcode + "\n\n" + title_content
+                else:
+                    # If no title section found, just handle excerpt
+                    parts = content.split("Excerpt for WordPress:", 1)
+                    if len(parts) == 2:
+                        content = parts[0].rstrip() + "\n\n" + shortcode + "\n\n----------------\n\n" + "Excerpt for WordPress:" + parts[1]
+                    else:
+                        content = content.rstrip() + "\n\n" + shortcode + "\n"
+            
+            return content
         else:
             logger.error("No content in completion response")
             st.error("No valid response content received")
@@ -308,11 +361,14 @@ def main():
                     )
                 with key_col:
                     keywords = st.text_area("Keywords (one per line, first keyword is primary)", 
-                          help="Enter keywords, one per line. The first keyword will be used as the primary keyword.", value=st.session_state.keywords, height=70, key="keywords")
+                          help="Enter keywords, one per line. The first keyword will be used as the primary keyword.", 
+                          height=70, 
+                          key="keywords")
                 
                 # Add angle input
                 angle = st.text_input("Article Angle", 
-                         help="If video lack focus or has multiple topics, enter the main angle you want the article to focus on (e.g., 'BTC situation analysis', 'ETH Technical analysis', 'Regulatory implications')", value=st.session_state.angle, key="angle")
+                         help="If video lack focus or has multiple topics, enter the main angle you want the article to focus on (e.g., 'BTC situation analysis', 'ETH Technical analysis', 'Regulatory implications')", 
+                         key="angle")
 
                 # Add section count input
                 section_count = st.number_input("Number of Content Sections", 
