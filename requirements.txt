@@ -1,8 +1,7 @@
-streamlit>=1.29.0
-openai>=1.6.1
-python-dotenv>=1.0.0
-youtube-transcript-api>=0.6.1
-yt-dlp
-ffmpeg-python
-pydub
-# you might also have to install ffmpeg on your system
+youtube-transcript-api
+streamlit
+openai
+python-dotenv
+httpx
+urllib3
+pytz

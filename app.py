@@ -70,7 +70,7 @@ class TranscriptFetcher:
             logger.error(f"Error getting YouTube transcript: {str(e)}")
             return None
 
-def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, text_content, text_source, language):
+def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, text_content, language):
     """Process all sources synchronously with retry logic"""
     MAX_RETRIES = 3
     transcripts = []
@@ -121,13 +121,13 @@ def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, chan
                 for source in failed_sources:
                     st.error(f"❌ Failed to get transcript for {source['channel']} after {MAX_RETRIES} attempts")
 
-    # Process direct text input
-    if text_content and text_source:
+    # Process direct text input - now without requiring text_source
+    if text_content:
         transcripts.append({
-            'source': text_source,
+            'source': 'Article',  # Default source name for pasted content
             'content': text_content
         })
-        st.success(f"✅ Added text from {text_source}")
+        st.success("✅ Added pasted content")
 
     return transcripts
 
@@ -178,17 +178,26 @@ Main Article Angle: {angle}
 - Prioritize information and insights that are most relevant to this perspective
 - Structure the article to build a coherent narrative around this angle"""
 
-        prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. {angle_instruction} Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
+        # Prepare the attribution format based on content type
+        attribution_instruction = (
+            "Include a concise attribution to the source videos. Recognise the speaker names if possible. "
+            "Use this format for attribution: '<a href=\"" + transcripts[0]['url'] + "\">" + transcripts[0]['source'] + "</a>'"
+            if 'url' in transcripts[0]
+            else "The content includes citations and references within the text."
+        )
 
-{keyword_instruction}
+        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
+
+""" + keyword_instruction + """
 
 First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
 * H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a strong opening that highlights the most newsworthy aspect of the video, specifically focusing on the chosen angle. Includes a concise attribution to the source videos. Recognise the speaker names if possible. Use this format for attribution: '<a href="{transcripts[0]['url']}">{transcripts[0]['source']}</a>'. 
+* Main content: Start with a strong opening that highlights the most newsworthy aspect, specifically focusing on the chosen angle. 
+  """ + attribution_instruction + """
 
-* Create exactly {section_count} distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
+* Create exactly """ + str(section_count) + """ distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
 * For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights related to the main angle.
@@ -206,13 +215,13 @@ After writing all the above sections, analyze the key points and generate these 
 Here are the transcripts to base the article on:
 """
         for transcript_item in transcripts:
-            prompt += f"### Transcript from {transcript_item['source']}\n{transcript_item['content']}\n\n"
+            prompt += """### Transcript from """ + transcript_item['source'] + "\n" + transcript_item['content'] + "\n\n"
 
         completion = client.chat.completions.create(
-            model="openai/gpt-4-turbo",
+            model="openai/gpt-4o-2024-11-20",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=3500,  # Increased to ensure we get all content including titles
+            max_tokens=5500,  # Increased to ensure we get all content including titles
             top_p=1,
             frequency_penalty=0,
             presence_penalty=0
@@ -273,8 +282,6 @@ def main():
         st.session_state.channel2 = ""
     if 'text_content' not in st.session_state:
         st.session_state.text_content = ""
-    if 'text_source' not in st.session_state:
-        st.session_state.text_source = ""
     if 'angle' not in st.session_state:
         st.session_state.angle = "Bitcoin Situation Analysis"
     if 'transcripts' not in st.session_state:
@@ -396,13 +403,11 @@ def main():
                     st.button("X", key="X_yt2", on_click=lambda: [X_field("yt_url2"), X_field("channel2")])
                 
                 # Text input in a more compact layout
-                text_col1, text_col2, text_col3 = st.columns([5, 2, 0.5])
+                text_col1, text_col3 = st.columns([6, 0.5])
                 with text_col1:
-                    text_content = st.text_area("Text Content", value=st.session_state.text_content, height=200, key="text_content", label_visibility="collapsed", placeholder="Or paste text content")
-                with text_col2:
-                    text_source = st.text_input("Source", value=st.session_state.text_source, key="text_source", label_visibility="collapsed", placeholder="Text Source")
+                    text_content = st.text_area("Text Content", value=st.session_state.text_content, height=200, key="text_content", label_visibility="collapsed", placeholder="Or paste text content (supports Markdown with references)")
                 with text_col3:
-                    st.button("X", key="X_text", on_click=lambda: [X_field("text_content"), X_field("text_source")])
+                    st.button("X", key="X_text", on_click=lambda: X_field("text_content"))
 
                 # Process button at the bottom of input section
                 if st.button("Process Sources", type="primary", key="process_btn", use_container_width=True):
@@ -414,7 +419,7 @@ def main():
                 try:
                     fetcher = TranscriptFetcher()
                     st.session_state.transcripts = process_sources(
-                        fetcher, yt_url1, channel1, yt_url2, channel2, text_content, text_source, language
+                        fetcher, yt_url1, channel1, yt_url2, channel2, text_content, language
                     )
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
