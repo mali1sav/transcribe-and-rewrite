@@ -6,3 +6,5 @@ httpx
 urllib3
 pytz
 tavily-python
+exa-py
+python-dateutil
