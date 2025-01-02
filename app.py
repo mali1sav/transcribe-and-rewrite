@@ -70,7 +70,7 @@ class TranscriptFetcher:
             logger.error(f"Error getting YouTube transcript: {str(e)}")
             return None
 
-def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, text_content, language):
+def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, yt_url3, channel3, text_content, language):
     """Process all sources synchronously with retry logic"""
     MAX_RETRIES = 3
     transcripts = []
@@ -81,6 +81,8 @@ def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, chan
         sources_to_process.append({"url": yt_url1, "channel": channel1})
     if yt_url2 and channel2:
         sources_to_process.append({"url": yt_url2, "channel": channel2})
+    if yt_url3 and channel3:
+        sources_to_process.append({"url": yt_url3, "channel": channel3})
 
     # Track processed sources
     processed_sources = set()
@@ -178,15 +180,19 @@ Main Article Angle: {angle}
 - Prioritize information and insights that are most relevant to this perspective
 - Structure the article to build a coherent narrative around this angle"""
 
-        # Prepare the attribution format based on content type
-        attribution_instruction = (
-            "Include a concise attribution to the source videos. Recognise the speaker names if possible. "
-            "Use this format for attribution: '<a href=\"" + transcripts[0]['url'] + "\">" + transcripts[0]['source'] + "</a>'"
-            if 'url' in transcripts[0]
-            else "The content includes citations and references within the text."
-        )
+        # Prepare the attribution format for multiple sources
+        attribution_instruction = "Include concise attributions to all source videos. Recognise the speaker names if possible. "
+        if any('url' in t for t in transcripts):
+            attribution_instruction += "Use these formats for attribution: "
+            sources_with_urls = [t for t in transcripts if 'url' in t]
+            attribution_instruction += ", ".join(
+                f"<a href=\"{t['url']}\">{t['source']}</a>" 
+                for t in sources_with_urls
+            )
+        else:
+            attribution_instruction += "The content includes citations and references within the text."
 
-        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
+        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Incorporate information from all provided sources, balancing content from each channel appropriately. Follow these keyword instructions:
 
 """ + keyword_instruction + """
 
@@ -280,6 +286,10 @@ def main():
         st.session_state.yt_url2 = ""
     if 'channel2' not in st.session_state:
         st.session_state.channel2 = ""
+    if 'yt_url3' not in st.session_state:
+        st.session_state.yt_url3 = ""
+    if 'channel3' not in st.session_state:
+        st.session_state.channel3 = ""
     if 'text_content' not in st.session_state:
         st.session_state.text_content = ""
     if 'angle' not in st.session_state:
@@ -402,6 +412,14 @@ def main():
                 with yt2_col3:
                     st.button("X", key="X_yt2", on_click=lambda: [X_field("yt_url2"), X_field("channel2")])
                 
+                yt3_col1, yt3_col2, yt3_col3 = st.columns([5, 2, 0.5])
+                with yt3_col1:
+                    yt_url3 = st.text_input("YouTube URL 3", value=st.session_state.yt_url3, key="yt_url3", label_visibility="collapsed", placeholder="YouTube URL 3 (Optional)")
+                with yt3_col2:
+                    channel3 = st.text_input("Channel 3", value=st.session_state.channel3, key="channel3", label_visibility="collapsed", placeholder="Channel 3")
+                with yt3_col3:
+                    st.button("X", key="X_yt3", on_click=lambda: [X_field("yt_url3"), X_field("channel3")])
+                
                 # Text input in a more compact layout
                 text_col1, text_col3 = st.columns([6, 0.5])
                 with text_col1:
@@ -419,7 +437,7 @@ def main():
                 try:
                     fetcher = TranscriptFetcher()
                     st.session_state.transcripts = process_sources(
-                        fetcher, yt_url1, channel1, yt_url2, channel2, text_content, language
+                        fetcher, yt_url1, channel1, yt_url2, channel2, yt_url3, channel3, text_content, language
                     )
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
