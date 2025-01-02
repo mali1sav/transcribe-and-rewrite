@@ -205,6 +205,7 @@ First, write the following sections:
 
 * Create exactly """ + str(section_count) + """ distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
 * For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
+* If the article contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensure proper spacing with one space before and after numbers, and maintain consistent formatting throughout the article.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights related to the main angle.
 
