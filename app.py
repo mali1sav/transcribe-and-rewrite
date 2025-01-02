@@ -192,20 +192,20 @@ Main Article Angle: {angle}
         else:
             attribution_instruction += "The content includes citations and references within the text."
 
-        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Incorporate information from all provided sources, balancing content from each channel appropriately. Follow these keyword instructions:
+        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the Thai article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Incorporate information from all provided sources, balancing content from each channel appropriately. Make complex concepts easy to understand for Thai readers. Follow these keyword instructions:
 
 """ + keyword_instruction + """
 
 First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
-* H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
+* Provide a concise and engaging news headline that captures the main idea of the article.
 * Main content: Start with a strong opening that highlights the most newsworthy aspect, specifically focusing on the chosen angle. 
   """ + attribution_instruction + """
 
-* Create exactly """ + str(section_count) + """ distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
-* For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
-* If the article contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensure proper spacing with one space before and after numbers, and maintain consistent formatting throughout the article.
+* Create exactly """ + str(section_count) + """ distinct and engaging headings for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without any <hr> separator line between sections.
+* For each content section, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
+* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensure proper spacing with one space before and after numbers, and maintain consistent formatting throughout the article.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights related to the main angle.
 
