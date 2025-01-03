@@ -343,7 +343,7 @@ In the main content:
 * Provide a concise but news-like Title, ensure it's engaging.
 * Open with the most newsworthy aspect.
 * Create exactly {section_count} sub-headings in Thai for the main content.
-* For each section, give in-depth context and the implications for crypto investors.
+* For each section, give in-depth context and the implications for crypto investors. Make complex concepts simple and easy to understand.
 * Use heading level 2 for each section heading.
 * If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
 * Whenever referencing a source, use the source’s Brand Name as a clickable hyperlink in Thai text, e.g., [Brand Name](URL).
