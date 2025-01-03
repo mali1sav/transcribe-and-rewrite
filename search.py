@@ -332,12 +332,12 @@ Follow these keyword instructions:
 Primary Keyword Optimization:
 Primary Keyword: {keyword_list[0] if keyword_list else ""}
 This must appear naturally ONCE in Title, Meta Description, and H1.
-Use this in H2 headings and paragraphs where they fit naturally.
+Use primary keyword in section headings and paragraphs where they fit naturally.
 Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
-揽 Use these in H2 headings and paragraphs where they fit naturally
-揽 Each secondary keyword should appear no more than 5 times in the entire content
-揽 Only use these in Title, Meta Description, or H1 if they fit naturally.
-揽 Skip any secondary keywords that don't fit naturally in the context
+* Use these in H2 headings and paragraphs where they fit naturally
+* Each secondary keyword should appear no more than 5 times in the entire content
+* Only use these in Title, Meta Description, or H1 if they fit naturally.
+* Skip any secondary keywords that don't fit naturally in the context
 
 In the main content:
 * Provide a concise but news-like Title, ensure it's engaging.
@@ -506,7 +506,7 @@ def main():
         
         st.text_area(
             "Keywords (one per line)",
-            height=70,  # Reduced height to show approximately 2 rows
+            height=68,  # Reduced height to show approximately 2 rows
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
