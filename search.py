@@ -506,7 +506,7 @@ def main():
         
         st.text_area(
             "Keywords (one per line)",
-            height=45,  # Reduced height to show approximately 2 rows
+            height=70,  # Reduced height to show approximately 2 rows
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
