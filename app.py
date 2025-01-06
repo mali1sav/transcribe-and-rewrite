@@ -70,7 +70,7 @@ class TranscriptFetcher:
             logger.error(f"Error getting YouTube transcript: {str(e)}")
             return None
 
-def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, text_content, language):
+def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, yt_url3, channel3, text_content, language):
     """Process all sources synchronously with retry logic"""
     MAX_RETRIES = 3
     transcripts = []
@@ -81,6 +81,8 @@ def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, chan
         sources_to_process.append({"url": yt_url1, "channel": channel1})
     if yt_url2 and channel2:
         sources_to_process.append({"url": yt_url2, "channel": channel2})
+    if yt_url3 and channel3:
+        sources_to_process.append({"url": yt_url3, "channel": channel3})
 
     # Track processed sources
     processed_sources = set()
@@ -178,27 +180,32 @@ Main Article Angle: {angle}
 - Prioritize information and insights that are most relevant to this perspective
 - Structure the article to build a coherent narrative around this angle"""
 
-        # Prepare the attribution format based on content type
-        attribution_instruction = (
-            "Include a concise attribution to the source videos. Recognise the speaker names if possible. "
-            "Use this format for attribution: '<a href=\"" + transcripts[0]['url'] + "\">" + transcripts[0]['source'] + "</a>'"
-            if 'url' in transcripts[0]
-            else "The content includes citations and references within the text."
-        )
+        # Prepare the attribution format for multiple sources
+        attribution_instruction = "Include concise attributions to all source videos. Recognise the speaker names if possible. "
+        if any('url' in t for t in transcripts):
+            attribution_instruction += "Use these formats for attribution: "
+            sources_with_urls = [t for t in transcripts if 'url' in t]
+            attribution_instruction += ", ".join(
+                f"<a href=\"{t['url']}\">{t['source']}</a>" 
+                for t in sources_with_urls
+            )
+        else:
+            attribution_instruction += "The content includes citations and references within the text."
 
-        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these keyword instructions:
+        prompt = """write a comprehensive and in-depth Thai crypto news article for WordPress. """ + angle_instruction + """ Ensure the Thai article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Incorporate information from all provided sources, balancing content from each channel appropriately. Make complex concepts easy to understand for Thai readers. Follow these keyword instructions:
 
 """ + keyword_instruction + """
 
 First, write the following sections:
 
 * Meta Description: Summarise the article in 160 characters in Thai.
-* H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
+* Provide a concise and engaging news headline that captures the main idea of the article.
 * Main content: Start with a strong opening that highlights the most newsworthy aspect, specifically focusing on the chosen angle. 
   """ + attribution_instruction + """
 
-* Create exactly """ + str(section_count) + """ distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without line separators between sections.
-* For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
+* Create exactly """ + str(section_count) + """ distinct and engaging headings for the main content, ensuring they align with and support the main angle. For each content section, pick the right format like sub-headings, paragraphs or list items for improve readability. Write content continuously without any <hr> separator line between sections.
+* For each content section, provide an in-depth explanation, context, and implications to Crypto investors, maintaining focus on the chosen angle. If relevant, include direct quotes or specific data points from the transcript to add credibility.
+* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensure proper spacing with one space before and after numbers, and maintain consistent formatting throughout the article.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink.
 * บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights related to the main angle.
 
@@ -280,6 +287,10 @@ def main():
         st.session_state.yt_url2 = ""
     if 'channel2' not in st.session_state:
         st.session_state.channel2 = ""
+    if 'yt_url3' not in st.session_state:
+        st.session_state.yt_url3 = ""
+    if 'channel3' not in st.session_state:
+        st.session_state.channel3 = ""
     if 'text_content' not in st.session_state:
         st.session_state.text_content = ""
     if 'angle' not in st.session_state:
@@ -402,6 +413,14 @@ def main():
                 with yt2_col3:
                     st.button("X", key="X_yt2", on_click=lambda: [X_field("yt_url2"), X_field("channel2")])
                 
+                yt3_col1, yt3_col2, yt3_col3 = st.columns([5, 2, 0.5])
+                with yt3_col1:
+                    yt_url3 = st.text_input("YouTube URL 3", value=st.session_state.yt_url3, key="yt_url3", label_visibility="collapsed", placeholder="YouTube URL 3 (Optional)")
+                with yt3_col2:
+                    channel3 = st.text_input("Channel 3", value=st.session_state.channel3, key="channel3", label_visibility="collapsed", placeholder="Channel 3")
+                with yt3_col3:
+                    st.button("X", key="X_yt3", on_click=lambda: [X_field("yt_url3"), X_field("channel3")])
+                
                 # Text input in a more compact layout
                 text_col1, text_col3 = st.columns([6, 0.5])
                 with text_col1:
@@ -419,7 +438,7 @@ def main():
                 try:
                     fetcher = TranscriptFetcher()
                     st.session_state.transcripts = process_sources(
-                        fetcher, yt_url1, channel1, yt_url2, channel2, text_content, language
+                        fetcher, yt_url1, channel1, yt_url2, channel2, yt_url3, channel3, text_content, language
                     )
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
