@@ -1,4 +1,5 @@
 import os
+import pytz
 from tavily import TavilyClient
 from datetime import datetime, timedelta, timezone
 import streamlit as st
@@ -9,10 +10,12 @@ from dateutil import parser
 from dotenv import load_dotenv
 from openai import OpenAI
 import re
-import html  # <--- Added for unescaping HTML entities
-import unicodedata  # <--- Added for unicode normalization
+import html
+import unicodedata
+import json
+import base64
+from together import Together
 
-# Load environment variables
 load_dotenv()
 
 def init_exa_client():
@@ -22,72 +25,10 @@ def init_exa_client():
     return Exa(api_key=exa_api_key)
 
 def get_domain(url):
-    """Extract domain from URL"""
     try:
         return url.split('/')[2]
     except:
         return url
-
-def format_time_ago(published_date):
-    """Format a datetime string into a human-readable 'time ago' format."""
-    if not published_date:
-        return "Unknown time"
-        
-    try:
-        # Try different date formats
-        date_formats = [
-            "%Y-%m-%dT%H:%M:%S.%fZ",  # Standard ISO format with microseconds
-            "%Y-%m-%dT%H:%M:%SZ",     # ISO format without microseconds
-            "%Y-%m-%d %H:%M:%S",      # Basic datetime format
-            "%Y-%m-%d",               # Just date
-        ]
-        
-        parsed_date = None
-        for fmt in date_formats:
-            try:
-                if isinstance(published_date, str):
-                    parsed_date = datetime.strptime(published_date, fmt)
-                    if fmt == "%Y-%m-%d":
-                        parsed_date = parsed_date.replace(hour=0, minute=0, second=0)
-                    break
-            except ValueError:
-                continue
-        
-        if not parsed_date and isinstance(published_date, str):
-            try:
-                parsed_date = parser.parse(published_date)
-            except:
-                print(f"Failed to parse date: {published_date}")
-                return "Unknown time"
-        
-        if not parsed_date:
-            return "Unknown time"
-            
-        now = datetime.now(timezone.utc)
-        if parsed_date.tzinfo is None:
-            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
-        
-        diff = now - parsed_date
-        seconds = diff.total_seconds()
-        if seconds < 60:
-            return "just now"
-        elif seconds < 3600:
-            minutes = int(seconds / 60)
-            return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-        elif seconds < 86400:
-            hours = int(seconds / 3600)
-            return f"{hours} hour{'s' if hours != 1 else ''} ago"
-        elif seconds < 604800:
-            days = int(seconds / 86400)
-            return f"{days} day{'s' if days != 1 else ''} ago"
-        elif seconds < 2592000:
-            weeks = int(seconds / 604800)
-            return f"{weeks} week{'s' if weeks != 1 else ''} ago"
-        else:
-            return parsed_date.strftime("%Y-%m-%d")
-    except Exception as e:
-        print(f"Error formatting time for date {published_date}: {str(e)}")
-        return "Unknown time"
 
 def init_tavily_client():
     tavily_api_key = os.getenv('TAVILY_API_KEY')
@@ -96,19 +37,16 @@ def init_tavily_client():
     return TavilyClient(api_key=tavily_api_key)
 
 def init_openai_client():
-    """Initialize OpenAI client with OpenRouter configuration."""
     try:
         openai_api_key = os.getenv('OPENROUTER_API_KEY')
         if not openai_api_key:
             raise ValueError("OPENROUTER_API_KEY not found in environment variables")
-            
-        # Initialize with OpenRouter base URL and headers
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=openai_api_key,
             default_headers={
-                "HTTP-Referer": "https://github.com/your-repo", # To identify your app
-                "X-Title": "Fast Transcriber" # To identify your app
+                "HTTP-Referer": "https://github.com/your-repo",
+                "X-Title": "Fast Transcriber"
             }
         )
         return client
@@ -117,66 +55,92 @@ def init_openai_client():
         return None
 
 def perform_exa_search(exa_client, query, num_results=5, hours_back=24, categories=None):
-    """
-    Perform search using Exa's search_and_contents API.
-    Returns a list of dictionaries containing search results.
-    """
     try:
-        # Calculate the date range
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(hours=hours_back)
         
-        # Format dates for Exa (ISO 8601 format)
         start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
         end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        # Base search parameters
         base_params = {
             'query': query,
-            'num_results': max(2, num_results // 3),  # Split results among categories
+            'num_results': 5,  # Always request 5 results
             'start_published_date': start_date_str,
             'end_published_date': end_date_str,
-            'type': 'auto',  # Let Exa choose the best search type
+            'type': 'auto',
             'use_autoprompt': True,
-            'text': True  # Get full text content
+            'text': True
         }
         
         all_results = []
-        categories = categories or ['news', 'company', 'tweet']
+        categories = categories or ['news']
         
-        # Perform search for each category
+        # Try each category until we have 5 results
         for category in categories:
+            if len(all_results) >= 5:
+                break
+                
             try:
                 search_params = base_params.copy()
                 search_params['category'] = category
-                
-                # Perform search with contents
                 response = exa_client.search_and_contents(**search_params)
-                
-                # Get results from the response
                 if response is not None:
-                    category_results = []
-                    if hasattr(response, 'results'):
-                        category_results = response.results
-                    elif isinstance(response, list):
-                        category_results = response
-                    
-                    # Transform results to dictionary format
+                    category_results = getattr(response, 'results', None) or response
                     for result in category_results:
                         if hasattr(result, 'text') and result.text:
-                            # Simple text cleaning - just convert to string
-                            text = str(result.text)
-                            title = str(result.title) if hasattr(result, 'title') and result.title else 'No Title'
-                            url = str(result.url) if hasattr(result, 'url') and result.url else ''
+                            # Handle text content with proper encoding
+                            try:
+                                if isinstance(result.text, bytes):
+                                    # Try UTF-8 first, then fallback to latin-1
+                                    try:
+                                        text = result.text.decode('utf-8')
+                                    except UnicodeDecodeError:
+                                        text = result.text.decode('latin-1')
+                                else:
+                                    text = str(result.text)
+                                
+                                # Validate text content
+                                if not text.strip() or any(ord(char) > 127 and not unicodedata.category(char).startswith('P') for char in text[:100]):
+                                    continue
+                            except Exception:
+                                continue
                             
-                            # Parse published date
+                            # Handle title with proper encoding
+                            try:
+                                if hasattr(result, 'title') and result.title:
+                                    if isinstance(result.title, bytes):
+                                        try:
+                                            title = result.title.decode('utf-8')
+                                        except UnicodeDecodeError:
+                                            title = result.title.decode('latin-1')
+                                    else:
+                                        title = str(result.title)
+                                else:
+                                    title = 'No Title'
+                            except Exception:
+                                title = 'No Title'
+                                
+                            # Handle URL
+                            try:
+                                if hasattr(result, 'url') and result.url:
+                                    if isinstance(result.url, bytes):
+                                        try:
+                                            url = result.url.decode('utf-8')
+                                        except UnicodeDecodeError:
+                                            url = result.url.decode('latin-1')
+                                    else:
+                                        url = str(result.url)
+                                else:
+                                    url = ''
+                            except Exception:
+                                url = ''
                             published_date = None
                             if hasattr(result, 'published_date') and result.published_date:
                                 try:
-                                    published_date = parser.parse(result.published_date)
-                                    if not published_date.tzinfo:
-                                        published_date = published_date.replace(tzinfo=timezone.utc)
-                                    published_date = published_date.isoformat()
+                                    parsed = parser.parse(result.published_date)
+                                    if not parsed.tzinfo:
+                                        parsed = parsed.replace(tzinfo=timezone.utc)
+                                    published_date = parsed.isoformat()
                                 except:
                                     pass
                             
@@ -188,15 +152,17 @@ def perform_exa_search(exa_client, query, num_results=5, hours_back=24, categori
                                 'source': get_domain(url)
                             }
                             all_results.append(transformed_result)
+                            
+                            # Stop if we have 5 results
+                            if len(all_results) >= 5:
+                                break
             except Exception as e:
-                print(f"Error searching {category} category: {str(e)}")
                 continue
         
-        # Sort results by date and limit to requested number
-        def get_date_for_sorting(result):
+        def get_date_for_sorting(item):
             try:
-                if result.get('published_date'):
-                    date = parser.parse(result['published_date'])
+                if item.get('published_date'):
+                    date = parser.parse(item['published_date'])
                     return date.replace(tzinfo=timezone.utc) if not date.tzinfo else date
                 return datetime.min.replace(tzinfo=timezone.utc)
             except:
@@ -214,61 +180,72 @@ def perform_exa_search(exa_client, query, num_results=5, hours_back=24, categori
         return []
 
 def serialize_search_results(search_results):
-    """Simple serialization of search results."""
     if not search_results:
         return {"results": []}
-        
     serialized_results = {
         "results": [
             {
-                "title": result["title"],
-                "url": result["url"],
-                "text": result["text"],
-                "published_date": result["published_date"],
-                "source": result["source"]
+                "title": r["title"],
+                "url": r["url"],
+                "text": r["text"],
+                "published_date": r["published_date"],
+                "source": r["source"]
             }
-            for result in search_results
+            for r in search_results
         ]
     }
     return serialized_results
 
 def perform_tavily_search(tavily_client, query, num_results=5, hours_back=24):
     try:
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(hours=hours_back)
-        
-        start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
+        days = max(1, round(hours_back / 24))
         response = tavily_client.search(
             query=query,
             search_depth="advanced",
+            topic="news", 
+            days=days,
             max_results=num_results,
-            include_raw_content=True,
-            filter_after_date=start_date_str
+            include_raw_content=True
         )
         
         results = []
         if response and 'results' in response:
             for result in response['results']:
                 cleaned_content = str(result.get('content', ''))
-                
-                published_date = None
-                if 'published_date' in result:
+                published_date_str = result.get('published_date')
+                parsed_published_date = None
+                if published_date_str:
                     try:
-                        published_date = parser.parse(result['published_date'])
-                        if not published_date.tzinfo:
-                            published_date = published_date.replace(tzinfo=timezone.utc)
-                    except Exception as e:
-                        st.error(f"Error parsing Tavily date: {str(e)}")
+                        parsed = parser.parse(published_date_str)
+                        if not parsed.tzinfo:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        parsed_published_date = parsed.isoformat()
+                    except:
+                        pass
                 
                 formatted_result = {
                     'title': result.get('title', ''),
                     'url': result.get('url', ''),
                     'text': cleaned_content,
                     'source': get_domain(result.get('url', '')),
-                    'published_date': published_date.isoformat() if published_date else None
+                    'published_date': parsed_published_date
                 }
                 results.append(formatted_result)
+
+        def get_date_for_sorting(item):
+            try:
+                if item.get('published_date'):
+                    date = parser.parse(item['published_date'])
+                    return date.replace(tzinfo=timezone.utc) if not date.tzinfo else date
+                return datetime.min.replace(tzinfo=timezone.utc)
+            except:
+                return datetime.min.replace(tzinfo=timezone.utc)
+                
+        results.sort(key=get_date_for_sorting, reverse=True)
+        results = results[:num_results]
+        
+        if results:
+            st.success(f"✅ Found {len(results)} results from Tavily")
         
         return results
     except Exception as e:
@@ -278,39 +255,23 @@ def perform_tavily_search(tavily_client, query, num_results=5, hours_back=24):
 def perform_web_research(exa_client, query, hours_back, search_engines):
     results = []
     try:
-        exa_results = perform_exa_search(exa_client, query, num_results=3, hours_back=hours_back)
+        exa_results = perform_exa_search(exa_client, query, num_results=5, hours_back=hours_back)
         results.extend(exa_results)
     except Exception as e:
         st.error(f"Exa search failed: {str(e)}")
     
     try:
         tavily_client = init_tavily_client()
-        tavily_results = perform_tavily_search(tavily_client, query, num_results=3, hours_back=hours_back)
-        results.extend(tavily_results)
+        tavily_results = perform_tavily_search(tavily_client, query, num_results=5, hours_back=hours_back)
+        if tavily_results:
+            results.extend(tavily_results)
     except Exception as e:
         st.error(f"Tavily search failed: {str(e)}")
     
     return results
 
-def prepare_content_for_gpt(search_results, selected_indices):
-    """Prepare content for GPT processing."""
-    try:
-        prepared_content = []
-        for idx in selected_indices:
-            result = search_results["results"][idx]
-            content_item = {
-                'text': result['text'].strip(),
-                'source': result['source'],
-                'url': result['url']
-            }
-            prepared_content.append(content_item)
-        return prepared_content
-    except Exception as e:
-        st.error(f"Error preparing content: {str(e)}")
-        return None
-
 def prepare_content_for_article(selected_results):
-    """Prepare selected search results for article generation."""
+    """Takes a list of results, each with 'url','source','text', and returns a 'transcript' list for GPT."""
     try:
         prepared_content = []
         for result in selected_results:
@@ -329,7 +290,7 @@ def prepare_content_for_article(selected_results):
         st.error(f"Error preparing content: {str(e)}")
         return None
 
-def generate_article(client: OpenAI, transcripts, keywords=None, section_count=3):
+def generate_article(client: OpenAI, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
     try:
         if not transcripts:
             return None
@@ -347,62 +308,61 @@ def generate_article(client: OpenAI, transcripts, keywords=None, section_count=3
             "XRP": '[latest_articles label="ข่าว XRP ล่าสุด" count_of_posts="6" taxonomy="category" term_id="502"]',
             "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
         }
+        
+        prompt = f"""
+Write a comprehensive and in-depth Thai crypto news article (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
+Then provide an Image Prompt in English describing the scene in one or two sentences.
 
-        keyword_instruction = f"""Primary Keyword Optimization:
+If there is promotional content provided below, seamlessly blend it into roughly 10% of the final article. The main news content (including any user-pasted main text) should remain the priority (~90% focus), but do a smooth transition into promotional text.
+
+Focus the article's perspective on the following news angle (optional), prioritise info and insights that are most relevant to this perspective and structure the article to build a coherent narrative around this angle:
+{news_angle or ""}
+
+Promotional Text (optional):
+{promotional_text or ""}
+
+Follow these keyword instructions:
+
+Primary Keyword Optimization:
 Primary Keyword: {keyword_list[0] if keyword_list else ""}
-This must appear naturally ONCE in Title, Meta Description, and H1.
-Use this in H2 headings and paragraphs where they fit naturally.
+- Use the primary keyword in its original form (Thai or English)
+- Integrate the keyword naturally while maintaining grammatical correctness
+- The keyword must appear naturally ONCE in Title, Meta Description, and H1
+- Use the keyword in section headings and paragraphs where it fits naturally
+
 Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
-- Use these in H2 headings and paragraphs where they fit naturally
-- Each secondary keyword should appear no more than 5 times in the entire content
-- Only use these in Title, Meta Description, or H1 if they fit naturally.
-- Skip any secondary keywords that don't fit naturally in the context"""
+* Use these in H2 headings and paragraphs where they fit naturally
+* Each secondary keyword should appear no more than 5 times in the entire content
+* Skip any secondary keywords that don't fit naturally in the context
 
-        angle_guidance = """Content Selection and Angle:
-- Use the primary keyword and search query to determine the main angle of the article
-- Only select content from sources that directly supports this angle
-- Maintain focus throughout the article by excluding tangential information
-- Ensure each section contributes to the main narrative
-- When multiple perspectives are available, prioritize those most relevant to the chosen angle"""
+In the main content:
+* Provide a concise but news-like Title, ensure it's engaging.
+* Open with the most newsworthy aspect.
+* Create exactly {section_count} sub-headings in Thai for the main content.
+* For each section, give in-depth context and the implications for crypto investors. Make complex concepts simple and easy to understand.
+* Use heading level 2 for each section heading.
+* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
+* Whenever referencing a source, use the source's Brand Name as a clickable hyperlink in Thai text, e.g., [Brand Name](URL).
 
-        prompt = f"""write a comprehensive and in-depth Thai crypto news article for WordPress. Ensure the article is detailed and informative, providing thorough explanations and analyses for each key point discussed. Follow these instructions:
+Use a H2 heading for บทสรุป: Summarize key points.
 
-{keyword_instruction}
+Excerpt for WordPress: In Thai, one sentence that briefly describes the article.
 
-{angle_guidance}
+Title & H1 Options (in Thai) under 60 characters. Meta Description Options (in Thai) under 160 characters, both integrating the primary keyword in its original English form naturally, both are engaging, with news-like sentences, and are click-worthy.
 
-First, write the following sections:
-
-* Meta Description: Summarise the article in 160 characters in Thai.
-* H1: Provide a concise title that captures the main idea of the article with a compelling hook in Thai.
-* Main content: Start with a strong opening that highlights the most newsworthy aspect. Focus on picking the right angle based on user query and the primary keyword. 
-
-* Create exactly {section_count} distinct and engaging headings (H2) for the main content, ensuring they align with and support the main angle. For each content under each H2, provide an in-depth explanation, context, and implications to Crypto investors.
-
-* Important Instruction: When referencing a source, use this format: '<a href="[URL]">[SOURCE_NAME]</a>'
-
-* บทสรุป: Use a H2 heading. Summarise key points and implications by emphasizing insights.
-
-* Excerpt for WordPress: In Thai, provide 1 sentence for a brief overview.
-
-* Image Prompt: In English, describe a scene that captures the article's essence, focus on only 1 or 2 objects. 
-
-After writing all the above sections, analyze the key points and generate these title options:
-* Title & H1 Options:
-  1. News style
-  2. Question style
-  3. Number style
+Finally, provide an Image Prompt in English describing a scene that fits the article in 1-2 sentences.
 
 Here are the sources to base the article on:
 """
-        for transcript_item in transcripts:
-            prompt += f"### Content from {transcript_item['source']}\nSource URL: {transcript_item['url']}\n{transcript_item['content']}\n\n"
+        # Append transcripts (which may include search results + user-provided main text)
+        for t in transcripts:
+            prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
 
         completion = client.chat.completions.create(
             model="openai/gpt-4o-2024-11-20",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=5500,
+            max_tokens=7000,
             top_p=1,
             frequency_penalty=0,
             presence_penalty=0,
@@ -415,79 +375,115 @@ Here are the sources to base the article on:
         if completion.choices and len(completion.choices) > 0:
             content = completion.choices[0].message.content
             shortcode = shortcode_map.get(primary_keyword, "")
-            if shortcode:
-                title_parts = content.split("Title & H1 Options:", 1)
-                if len(title_parts) == 2:
-                    main_content = title_parts[0]
-                    title_content = "Title & H1 Options:" + title_parts[1]
-                    
-                    parts = main_content.split("บทสรุป:", 1)
-                    if len(parts) == 2:
-                        summary_parts = parts[1].split("Excerpt for WordPress:", 1)
-                        if len(summary_parts) == 2:
-                            content = (
-                                parts[0] 
-                                + "บทสรุป:" 
-                                + summary_parts[0] 
-                                + "\n\n" 
-                                + shortcode 
-                                + "\n\n----------------\n\n" 
-                                + "Excerpt for WordPress:" 
-                                + summary_parts[1].rstrip() 
-                                + "\n\n" 
-                                + title_content
-                            )
-                        else:
-                            content = parts[0] + "บทสรุป:" + parts[1].rstrip() + "\n\n" + shortcode + "\n\n" + title_content
-                    else:
-                        parts = main_content.split("Excerpt for WordPress:", 1)
-                        if len(parts) == 2:
-                            content = (
-                                parts[0].rstrip() 
-                                + "\n\n" 
-                                + shortcode 
-                                + "\n\n----------------\n\n" 
-                                + "Excerpt for WordPress:" 
-                                + parts[1].rstrip() 
-                                + "\n\n" 
-                                + title_content
-                            )
-                        else:
-                            content = main_content.rstrip() + "\n\n" + shortcode + "\n\n" + title_content
-                else:
-                    parts = content.split("Excerpt for WordPress:", 1)
-                    if len(parts) == 2:
-                        content = parts[0].rstrip() + "\n\n" + shortcode + "\n\n----------------\n\n" + "Excerpt for WordPress:" + parts[1]
-                    else:
-                        content = content.rstrip() + "\n\n" + shortcode + "\n"
             
-            content = re.sub(r'\n\*\s*Meta Description:\s*', '\n### Meta Description\n', content)
-            content = re.sub(r'\n\*\s*H1:\s*', '\n# ', content)
-            content = re.sub(r'\n\*\s*บทสรุป:\s*', '\n## บทสรุป\n', content)
-            content = re.sub(r'\n\*\s*Excerpt for WordPress:\s*', '\n### Excerpt for WordPress\n', content)
-            content = re.sub(r'\n\*\s*Image Prompt:\s*', '\n### Image Prompt\n', content)
-            content = re.sub(r'\n\*\s*Title & H1 Options:\s*', '\n### Title & H1 Options\n', content)
+            if shortcode:
+                # Example insertion point
+                excerpt_split = "Excerpt for WordPress:"
+                if excerpt_split in content:
+                    parts = content.split(excerpt_split, 1)
+                    content = (
+                        parts[0].rstrip() + "\n\n" +
+                        shortcode + "\n\n----------------\n\n" +
+                        excerpt_split + parts[1]
+                    )
+            
             return content
-        
-        return None
+        else:
+            st.error("No valid response content received")
+            return None
+
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return None
 
+def extract_image_prompt(article_text):
+    pattern = r"(?i)Image Prompt.*?\n(.*)"
+    match = re.search(pattern, article_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
 def main():
     st.set_page_config(page_title="Search and Generate Articles", layout="wide")
+    
+    st.markdown("""
+    <style>
+    .block-container {
+        padding: 2rem;
+        margin: 2rem;
+    }
+    .element-container{
+        font-weight: bold;
+    }
+    .stTitle, h1 {
+        font-size: 1.5rem !important;
+        margin-bottom: 0.5rem !important;
+        color: #333 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.5rem;
+        padding-top: 0.5rem;
+    }
+    div[data-testid="stSidebarUserContent"] > div:nth-child(1) {
+        padding-top: 0.5rem;
+    }
+    .st-emotion-cache-16txtl3 {
+        padding-top: 0.5rem;
+    }
+    /* Make checkboxes larger and easier to click */
+    [data-testid="stCheckbox"] {
+        scale: 1.5;
+        padding: 0;
+        margin: 0 10px;
+    }
+    /* Style all buttons to be blue by default */
+    .stButton button, .secondary {
+        background-color: #0066FF !important;
+        color: white !important;
+        width:70%;
+        font-size: 1.8em;
+        line-height: 1.8em;
+        padding: 5px 30px 5px 30px;
+        width: 40%;
+    }
+    .stButton button:hover {
+        background-color: #0052CC !important;
+        color: white !important;
+    }
+    [data-testid="stTextArea"][aria-label="Keywords (one per line)"] textarea {
+        min-height: 45px !important;
+        height: 45px !important;
+    }
+    /* Style search results */
+    .search-result {
+        font-size: 1rem !important;
+        color: #333;
+        margin: 0.25rem 0;
+    }
+    .search-result-source {
+        color: green;
+        font-size: 0.8rem;
+        font-weight: normal;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
     st.title("Search and Generate Articles")
 
     if 'keywords' not in st.session_state:
-        st.session_state.keywords = "Bitcoin\nBTC"
+        st.session_state.keywords = "Bitcoin"
     if 'query' not in st.session_state:
-        st.session_state.query = "Bitcoin Technical Price Analysis"
+        st.session_state.query = "Bitcoin Situation Analysis"
     if 'selected_indices' not in st.session_state:
         st.session_state.selected_indices = []
     if 'article' not in st.session_state:
         st.session_state.article = None
     if 'generating' not in st.session_state:
         st.session_state.generating = False
+    if 'search_results' not in st.session_state:
+        st.session_state.search_results = None
+    if 'search_results_json' not in st.session_state:
+        st.session_state.search_results_json = None
 
     try:
         exa_client = init_exa_client()
@@ -502,15 +498,28 @@ def main():
     with st.sidebar:
         query = st.text_input("Enter your search query:", value=st.session_state.query)
         
+        hours_back = st.slider("Hours to look back:", 1, 168, 6)
+        
         st.text_area(
             "Keywords (one per line)",
-            height=70,
+            height=68,  # Reduced height to show approximately 2 rows
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
         
-        section_count = st.slider("Number of sections:", 2, 5, 3)
-        hours_back = st.slider("Hours to look back:", 1, 168, 6)
+        # Larger text area for user-provided main content:
+        user_main_text = st.text_area(
+            "Additional Main News Text (Optional)",
+            height=150,
+            help="Paste any additional text you want included in the main portion of the article. This is not a promotional block."
+        )
+        
+        promotional_text = st.text_area(
+            "Promotional Text (Optional)",
+            height=100,
+            help="Paste any promotional content or CTA you want appended (about 10% weighting)."
+        )
+
         search_button = st.button("Search")
 
     if search_button and query:
@@ -523,10 +532,15 @@ def main():
             )
             if results:
                 st.session_state.search_results = serialize_search_results(results)
+                st.session_state.search_results_json = json.dumps(
+                    st.session_state.search_results, 
+                    ensure_ascii=False, 
+                    indent=4
+                )
             else:
                 st.warning("No results found. Try adjusting your search parameters.")
     
-    if hasattr(st.session_state, 'search_results'):
+    if st.session_state.search_results:
         results = st.session_state.search_results
         st.subheader("Search Results")
         
@@ -546,20 +560,62 @@ def main():
                     title = result['title']
                     source = result['source']
                     url = result['url']
+                    published_date = result['published_date'] or "Unknown time"
                     
-                    st.markdown(f"#### [{title}]({url})")
-                    source_text = f"**Source:** {source}"
-                    if result.get('published_date'):
-                        source_text += f" | *Published: {format_time_ago(result['published_date'])}*"
-                    st.markdown(source_text)
+                    def format_local_date(iso_date):
+                        if not iso_date:
+                            return "Unknown time"
+                        try:
+                            utc_time = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
+                            local_tz = pytz.timezone('Asia/Bangkok')  # Default to Bangkok time
+                            local_time = utc_time.astimezone(local_tz)
+                            return local_time.strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            return "Unknown time"
+                    
+                    formatted_date = format_local_date(published_date)
+                    st.markdown(f'<div class="search-result"><a href="{url}" target="_blank">{title}</a><br><span class="search-result-source">Source: {source} | Published: {formatted_date}</span></div>', unsafe_allow_html=True)
                     
                     preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
                     st.markdown(preview)
                     with st.expander("Show full content"):
                         st.write(result['text'])
         
-        if st.session_state.selected_indices:
-            if st.button("Generate Article"):
+        if st.session_state.selected_indices or user_main_text.strip():
+            news_angle = st.text_input(
+                "News Angle",
+                value="",
+                help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective
+                Tips: You can use one of the English headlines from your selected news sources as your news angle."""
+            )
+            
+            # Move number of sections slider to the right
+            cols = st.columns([0.4, 0.6])
+            with cols[0]:
+                section_count = st.slider("Number of sections:", 2, 6, 3, key="section_count")
+            with cols[1]:
+                st.markdown(
+                    """
+                    <style>
+                    div.stButton > button {
+                        background-color: #0066FF;
+                        color: white;
+                        font-size: 1.8em;
+                        line-height: 1.8em;
+                        padding: 5px 30px 5px 30px;
+                        width: 40%;
+                    }
+                    div.stButton > button:hover {
+                        background-color: #0052CC;
+                        color: white;
+                    }
+                    </style>
+                    """, 
+                    unsafe_allow_html=True
+                )
+                generate_btn = st.button("Generate Article")
+
+            if generate_btn:
                 st.session_state.generating = True
                 keywords = st.session_state.keywords.strip().split('\n')
                 keywords = [k.strip() for k in keywords if k.strip()]
@@ -567,30 +623,64 @@ def main():
                 selected_results = [results['results'][idx] for idx in st.session_state.selected_indices]
                 prepared_content = prepare_content_for_article(selected_results)
                 
+                # If the user provides "Additional Main News Text", append it as a source
+                if user_main_text.strip():
+                    prepared_content.append({
+                        "url": "UserProvided",
+                        "source": "User Main Text",
+                        "content": user_main_text.strip()
+                    })
+                
                 if prepared_content:
                     with st.spinner("Generating article..."):
                         article = generate_article(
                             client=openai_client,
                             transcripts=prepared_content,
                             keywords='\n'.join(keywords) if keywords else None,
-                            section_count=section_count
+                            news_angle=news_angle,
+                            section_count=section_count,
+                            promotional_text=promotional_text
                         )
                         if article:
                             st.session_state.article = article
                             st.success("Article generated successfully!")
-                            if st.session_state.article:
-                                st.subheader("Generated Article")
-                                st.markdown(st.session_state.article, unsafe_allow_html=True)
-                                
-                                st.download_button(
-                                    label="Download Article",
-                                    data=st.session_state.article,
-                                    file_name="generated_article.txt",
-                                    mime="text/plain",
-                                    use_container_width=True
-                                )
+                            
+                            st.subheader("Generated Article")
+                            st.markdown(st.session_state.article, unsafe_allow_html=True)
+                            st.download_button(
+                                label="Download Article",
+                                data=st.session_state.article,
+                                file_name="generated_article.txt",
+                                mime="text/plain",
+                                use_container_width=True
+                            )
+
+                            image_prompt = extract_image_prompt(st.session_state.article)
+                            if image_prompt:
+                                with st.spinner("Generating image from Together AI..."):
+                                    together_client = Together()
+                                    response = together_client.images.generate(
+                                        prompt=image_prompt,
+                                        model="black-forest-labs/FLUX.1-schnell-Free",
+                                        width=1200,
+                                        height=800,
+                                        steps=4,
+                                        n=1,
+                                        response_format="b64_json"
+                                    )
+                                    if response and response.data and len(response.data) > 0:
+                                        b64_data = response.data[0].b64_json
+                                        st.image(
+                                            "data:image/png;base64," + b64_data,
+                                            caption=image_prompt
+                                        )
+                                    else:
+                                        st.error("Failed to generate image from Together AI.")
                         else:
                             st.error("Failed to generate article. Please try again.")
 
-if __name__ == "__main__":
+def run_app():
     main()
+
+if __name__ == "__main__":
+    run_app()
