@@ -325,7 +325,7 @@ Follow these keyword instructions:
 
 Primary Keyword Optimization:
 Primary Keyword: {keyword_list[0] if keyword_list else ""}
-- Use the primary keyword in its original form (Thai or English)
+- Always use the primary keyword in its original form, whether it is in Thai or English. For instance, if the primary keyword is "Bitcoin," use "Bitcoin" and not "บิทคอยน์" in the article. Similarly, if the primary keyword is "โซลาน่า," use "โซลาน่า" instead of "Solana" in the article.
 - Integrate the keyword naturally while maintaining grammatical correctness
 - The keyword must appear naturally ONCE in Title, Meta Description, and H1
 - Use the keyword in section headings and paragraphs where it fits naturally
@@ -338,13 +338,15 @@ Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else '
 In the main content:
 * Provide a concise but news-like Title, ensure it's engaging.
 * Open with the most newsworthy aspect.
-* Create exactly {section_count} sub-headings in Thai for the main content.
-* For each section, give in-depth context and the implications for crypto investors. Make complex concepts simple and easy to understand.
+* Important Instruction:Create exactly {section_count} sub-headings in Thai for the main content.
+* For each section, give in-depth context and explanation. Make complex concepts simple and easy to understand.
 * Use heading level 2 for each section heading.
 * If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
-* Whenever referencing a source, use the source's Brand Name as a clickable hyperlink in Thai text, e.g., [Brand Name](URL).
+* Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink. You must ensure that the hyperlink leads to the source's webpage.
 
 Use a H2 heading for บทสรุป: Summarize key points.
+
+Print relevant shortcode based on the primary keyword.
 
 Excerpt for WordPress: In Thai, one sentence that briefly describes the article.
 
@@ -377,7 +379,7 @@ Here are the sources to base the article on:
             shortcode = shortcode_map.get(primary_keyword, "")
             
             if shortcode:
-                # Example insertion point
+                # If "Excerpt for WordPress:" is in the content, insert the shortcode before it
                 excerpt_split = "Excerpt for WordPress:"
                 if excerpt_split in content:
                     parts = content.split(excerpt_split, 1)
@@ -386,6 +388,9 @@ Here are the sources to base the article on:
                         shortcode + "\n\n----------------\n\n" +
                         excerpt_split + parts[1]
                     )
+                else:
+                    # Fallback if the excerpt keyword isn't found; just append at the end
+                    content += f"\n\n{shortcode}\n\n----------------\n"
             
             return content
         else:
@@ -502,7 +507,7 @@ def main():
         
         st.text_area(
             "Keywords (one per line)",
-            height=68,  # Reduced height to show approximately 2 rows
+            height=68,
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
