@@ -144,18 +144,21 @@ def perform_exa_search(exa_client, query, num_results=5, hours_back=24, categori
                                 except:
                                     pass
                             
-                            transformed_result = {
-                                'title': title,
-                                'url': url,
-                                'published_date': published_date,
-                                'text': text,
-                                'source': get_domain(url)
-                            }
-                            all_results.append(transformed_result)
-                            
-                            # Stop if we have 5 results
-                            if len(all_results) >= 5:
-                                break
+                            # Only include results from news sources (exclude Twitter)
+                            source_domain = get_domain(url)
+                            if 'twitter.com' not in source_domain:
+                                transformed_result = {
+                                    'title': title,
+                                    'url': url,
+                                    'published_date': published_date,
+                                    'text': text,
+                                    'source': source_domain
+                                }
+                                all_results.append(transformed_result)
+                                
+                                # Stop if we have 5 results
+                                if len(all_results) >= 5:
+                                    break
             except Exception as e:
                 continue
         
@@ -211,7 +214,10 @@ def perform_tavily_search(tavily_client, query, num_results=5, hours_back=24):
         results = []
         if response and 'results' in response:
             for result in response['results']:
-                cleaned_content = str(result.get('content', ''))
+                # Use raw_content if available, otherwise fall back to content
+                raw_content = result.get('raw_content', '')
+                content = str(raw_content if raw_content else result.get('content', ''))
+                
                 published_date_str = result.get('published_date')
                 parsed_published_date = None
                 if published_date_str:
@@ -226,7 +232,7 @@ def perform_tavily_search(tavily_client, query, num_results=5, hours_back=24):
                 formatted_result = {
                     'title': result.get('title', ''),
                     'url': result.get('url', ''),
-                    'text': cleaned_content,
+                    'text': content,
                     'source': get_domain(result.get('url', '')),
                     'published_date': parsed_published_date
                 }
@@ -310,13 +316,21 @@ def generate_article(client: OpenAI, transcripts, keywords=None, news_angle=None
         }
         
         prompt = f"""
-Write a comprehensive and in-depth Thai crypto news article (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
+Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
 Then provide an Image Prompt in English describing the scene in one or two sentences.
 
 If there is promotional content provided below, seamlessly blend it into roughly 10% of the final article. The main news content (including any user-pasted main text) should remain the priority (~90% focus), but do a smooth transition into promotional text.
 
-Focus the article's perspective on the following news angle (optional), prioritise info and insights that are most relevant to this perspective and structure the article to build a coherent narrative around this angle:
-{news_angle or ""}
+Focus the article's perspective on the following news angle: {news_angle or ""}.
+
+Ensure the article includes:
+1. Context: Provide a brief background information to help readers understand the topic.
+2. Key Points: Highlight the most important facts, events, or developments.
+3. Analysis: Explain the significance of the news, including potential impacts or implications.
+4. Future Outlook: Discuss what might happen next or long-term trends (if applicable).
+5. Actionable Insights: Provide clear takeaways for readers, such as what to watch for or how the news might affect them.
+
+Structure the article to build a coherent narrative around the news angle, balancing facts and analysis while keeping the content accessible to all readers.
 
 Promotional Text (optional):
 {promotional_text or ""}
@@ -338,15 +352,13 @@ Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else '
 In the main content:
 * Provide a concise but news-like Title, ensure it's engaging.
 * Open with the most newsworthy aspect.
-* Important Instruction:Create exactly {section_count} sub-headings in Thai for the main content.
-* For each section, give in-depth context and explanation. Make complex concepts simple and easy to understand.
-* Use heading level 2 for each section heading.
+* Important Instruction: Create exactly {section_count} sectionheadings in Thai for the main content.
+* For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
+* Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
 * If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
 * Important Instruction: When referencing a source, naturally integrate the Brand Name into the sentence as a clickable hyperlink. You must ensure that the hyperlink leads to the source's webpage.
 
 Use a H2 heading for บทสรุป: Summarize key points.
-
-Print relevant shortcode based on the primary keyword.
 
 Excerpt for WordPress: In Thai, one sentence that briefly describes the article.
 
@@ -364,7 +376,7 @@ Here are the sources to base the article on:
             model="openai/gpt-4o-2024-11-20",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=7000,
+            max_tokens=9000,
             top_p=1,
             frequency_penalty=0,
             presence_penalty=0,
@@ -378,8 +390,8 @@ Here are the sources to base the article on:
             content = completion.choices[0].message.content
             shortcode = shortcode_map.get(primary_keyword, "")
             
+            # 1) Insert the relevant shortcode in the final text
             if shortcode:
-                # If "Excerpt for WordPress:" is in the content, insert the shortcode before it
                 excerpt_split = "Excerpt for WordPress:"
                 if excerpt_split in content:
                     parts = content.split(excerpt_split, 1)
@@ -389,8 +401,11 @@ Here are the sources to base the article on:
                         excerpt_split + parts[1]
                     )
                 else:
-                    # Fallback if the excerpt keyword isn't found; just append at the end
                     content += f"\n\n{shortcode}\n\n----------------\n"
+            
+            # 2) Post-processing to remove "$" and replace with " ดอลลาร์"
+            #    A simple regex that targets something like $100,000 → 100,000 ดอลลาร์
+            content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
             
             return content
         else:
@@ -590,11 +605,10 @@ def main():
             news_angle = st.text_input(
                 "News Angle",
                 value="",
-                help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective
+                help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective.
                 Tips: You can use one of the English headlines from your selected news sources as your news angle."""
             )
             
-            # Move number of sections slider to the right
             cols = st.columns([0.4, 0.6])
             with cols[0]:
                 section_count = st.slider("Number of sections:", 2, 6, 3, key="section_count")
