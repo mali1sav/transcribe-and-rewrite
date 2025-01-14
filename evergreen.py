@@ -194,8 +194,80 @@ def generate_article(client: OpenAI, transcripts, keywords=None, evergreen_focus
         
         primary_keyword = keyword_list[0].upper() if keyword_list else ""
         
+        # Determine if the only source is Additional Evergreen Text
+        is_additional_text_only = all(t['source'] == "User Main Text" for t in transcripts)
+        
+        # Check if the pasted content is longer than 2000 words
+        pasted_content_length = len(transcripts[0]['content'].split()) if is_additional_text_only else 0
+        needs_condensing = pasted_content_length > 2000
+
         # Evergreen prompt
-        prompt = f"""
+        if is_additional_text_only:
+            if needs_condensing:
+                prompt = f"""
+Adapt and translate the following content into a comprehensive article in Thai. 
+Focus on improving readability and structure while preserving the original key points. 
+Integrate the provided keywords naturally and ensure the article is approximately 2000 words by prioritizing key aspects of the pasted content.
+Reference sources naturally e.g. use the Brand Name as a clickable hyperlink to the source webpage
+
+Primary Keyword: {primary_keyword}
+Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
+
+Content to adapt:
+{transcripts[0]['content']}
+
+Instructions:
+1. Translate the content into Thai.
+2. Adjust the structure for better readability.
+3. Integrate keywords naturally.
+4. Prioritize key aspects of the pasted content to condense it to approximately 2000 words.
+5. Provide the following components in Thai:
+   - Title
+   - Main Content (with {section_count} sections)
+   - บทสรุป
+   - Excerpt for WordPress
+   - Title & H1 Options
+   - Meta Description Options
+6. Provide an Image Prompt in English describing the scene in 1-2 sentences that fits this article.
+
+Promotional Text (optional):
+{promotional_text or ""}
+
+Note: The main content should remain the priority (~90% focus). If promotional content is provided, blend it in naturally at ~10% of the final article.
+"""
+            else:
+                prompt = f"""
+Adapt and translate the following content into a comprehensive, evergreen-style article in Thai. 
+Focus on improving readability by structuring content while preserving the original key points. 
+Integrate the provided keywords naturally and ensure the article reaches approximately 2000 words.
+
+Primary Keyword: {primary_keyword}
+Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
+
+Content to adapt:
+{transcripts[0]['content']}
+
+Instructions:
+1. Translate the content into Thai.
+2. For better readability, Adjust the structure by choosing appropriate headings, paragraphs, lists or table.
+3. Integrate keywords naturally.
+4. Ensure the article reaches 2000 words. If it doesn't, continue expanding on the content without concluding.
+5. Provide the following components in Thai:
+   - Title
+   - Main Content (with {section_count} sections)
+   - บทสรุป
+   - Excerpt for WordPress
+   - Title & H1 Options
+   - Meta Description Options
+6. Provide an Image Prompt in English describing the scene that fits this article in 1-2 sentences.
+
+Promotional Text (optional):
+{promotional_text or ""}
+
+Note: The main content should remain the priority (~90% focus). If promotional content is provided, blend it in naturally at ~10% of the final article.
+"""
+        else:
+            prompt = f"""
 Write a comprehensive, evergreen-style article in Thai with these components: 
 (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
 Then provide an Image Prompt in English describing the scene in 1-2 sentences.
@@ -204,7 +276,8 @@ Focus the article's perspective on this evergreen angle or topic: {evergreen_foc
 
 In the main content:
 * Create {section_count} unique section headings in Thai for the main content
-* For each section, provide a thorough and detailed exploration of the topic. Use at least four detailed paragraphs per section, each containing specific examples, data points, and case studies. If it hasn't reached four paragraphs, do not conclude the section. Try to add more paragraphs and word countas you go.
+* For each section, provide a thorough and detailed exploration of the topic. Use at least four detailed paragraphs per section, each containing specific examples, data points, and case studies. If it hasn't reached four paragraphs, do not conclude the section. Try to add more paragraphs and word count as you go.
+* Ensure the article reaches 2000 words. If it doesn't, continue expanding on the content without concluding.
 * If the content contains numbers that represent monetary values, remove $ signs and add "ดอลลาร์" after each number with a single space
 * When referencing sources, naturally integrate the Brand Name as a clickable hyperlink to the source webpage
 
@@ -212,9 +285,9 @@ Excerpt for WordPress: 1 sentence in Thai giving a quick overview of the article
 
 Title & H1 Options in Thai under 60 characters. Meta Description Options in Thai under 160 characters with the primary keyword. Make them engaging and evergreen.
 
-Finally, provide an Image Prompt in English describing a scene that fits this evergreen content.
+Finally, provide an Image Prompt in English describing a scene that fits this article.
 
-(If promotional content is provided below, weave it in at ~10% of the final article.)
+If there is promotional content provided below, seamlessly blend it into roughly 10% of the final article. The main news content (including any user-pasted main text) should remain the priority (~90% focus), but do a smooth transition into promotional text.
 
 Promotional Text (optional):
 {promotional_text or ""}
@@ -231,8 +304,8 @@ Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else '
 
 Sources:
 """
-        for t in transcripts:
-            prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
+            for t in transcripts:
+                prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
 
         completion = client.chat.completions.create(
             model="openai/gpt-4o-2024-11-20",
@@ -253,6 +326,49 @@ Sources:
             
             # Replace "$" with " ดอลลาร์"
             content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
+            
+            # Ensure the article reaches approximately 2000 words
+            word_count = len(content.split())
+            if word_count < 2000 and not needs_condensing:
+                additional_prompt = f"""
+The article is currently {word_count} words long. Please continue expanding on the content to reach 2000 words. 
+Focus on adding more detailed paragraphs, examples, and case studies without concluding the article.
+"""
+                additional_completion = client.chat.completions.create(
+                    model="openai/gpt-4o-2024-11-20",
+                    messages=[{"role": "user", "content": additional_prompt}],
+                    temperature=0.6,
+                    max_tokens=10000,
+                    top_p=0.9,
+                    frequency_penalty=0.2,
+                    presence_penalty=0.2,
+                    extra_headers={
+                        "HTTP-Referer": "https://github.com/cascade",
+                        "X-Title": "Cascade"
+                    }
+                )
+                if additional_completion.choices and len(additional_completion.choices) > 0:
+                    additional_content = additional_completion.choices[0].message.content
+                    content += "\n" + additional_content
+            elif word_count > 2000 and needs_condensing:
+                condensing_prompt = f"""
+The article is currently {word_count} words long. Please condense it to approximately 2000 words by prioritizing key aspects of the pasted content.
+"""
+                condensing_completion = client.chat.completions.create(
+                    model="openai/gpt-4o-2024-11-20",
+                    messages=[{"role": "user", "content": condensing_prompt}],
+                    temperature=0.6,
+                    max_tokens=10000,
+                    top_p=0.9,
+                    frequency_penalty=0.2,
+                    presence_penalty=0.2,
+                    extra_headers={
+                        "HTTP-Referer": "https://github.com/cascade",
+                        "X-Title": "Cascade"
+                    }
+                )
+                if condensing_completion.choices and len(condensing_completion.choices) > 0:
+                    content = condensing_completion.choices[0].message.content
             
             return content
         else:
@@ -305,15 +421,17 @@ def main():
     .stButton button, .secondary {
         background-color: #0066FF !important;
         color: white !important;
-        width:70%;
-        font-size: 1.8em;
-        line-height: 1.8em;
-        padding: 5px 30px 5px 30px;
-        width: 40%;
+        font-size: 1.2em;
+        line-height: 1.5em;
+        padding: 10px 20px;
+        width: 100%;
+        border-radius: 5px;
+        border: none;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
     }
     .stButton button:hover {
         background-color: #0052CC !important;
-        color: white !important;
     }
     [data-testid="stTextArea"][aria-label="Keywords (one per line)"] textarea {
         min-height: 45px !important;
@@ -329,15 +447,17 @@ def main():
         font-size: 0.8rem;
         font-weight: normal;
     }
+
+
     </style>
     """, unsafe_allow_html=True)
     
     st.title("Search and Generate Evergreen Articles")
 
     if 'keywords' not in st.session_state:
-        st.session_state.keywords = "AI Agent"
+        st.session_state.keywords = "AI Agent คือ\nลงทุน AI Agent"
     if 'query' not in st.session_state:
-        st.session_state.query = "AI Agent Economy in Crypto industry"
+        st.session_state.query = "2025 will be the year of AI agents"
     if 'selected_indices' not in st.session_state:
         st.session_state.selected_indices = []
     if 'article' not in st.session_state:
@@ -360,10 +480,10 @@ def main():
         return
 
     with st.sidebar:
-        query = st.text_input("Enter your evergreen topic or query:", value=st.session_state.query)
+        query = st.text_input("Enter your search query:", value=st.session_state.query)
         
         # Instead of hours, let users specify a day range or no limit:
-        max_age_days = st.number_input("Max Age of Content in Days (30 recommended, 0 for none):", min_value=0, value=30)
+        max_age_days = st.number_input("Max Age of Content in Days (30 recommended):", min_value=0, value=30)
         max_age_days = None if max_age_days == 0 else max_age_days
         
         st.text_area(
@@ -385,7 +505,24 @@ def main():
             help="Paste any promotional content or CTA you want appended (~10%)."
         )
 
-        search_button = st.button("Search")
+        # Move the Generate Evergreen Article button to the sidebar
+        evergreen_angle = st.text_input(
+            "Evergreen Topic/Angle",
+            value="",
+            help="""You can specify the core angle or focus of your evergreen article. 
+            For instance, 'Long-term benefits of blockchain technology.'"""
+        )
+        
+        section_count = st.slider("Number of sections:", 2, 8, 5, key="section_count")
+        
+        # Renamed button: Generate Article from Pasted Text
+        generate_btn_pasted_text = st.button("Generate Article from Pasted Text")
+        st.markdown("<div style='text-align: center; margin: 10px; padding: 5px'>Or</div>", unsafe_allow_html=True)
+        # Move the Search button below the Generate Article from Pasted Text button
+        search_button = st.button("Search Content")
+
+    # Initialize generate_btn_all_sources to False
+    generate_btn_all_sources = False
 
     if search_button and query:
         with st.spinner("Searching..."):
@@ -448,103 +585,77 @@ def main():
                     st.markdown(preview)
                     with st.expander("Show full content"):
                         st.write(result['text'])
+
+        # Renamed button: Generate Article from All Sources
+        generate_btn_all_sources = st.button("Generate Article from All Sources")
+
+    # Article generation logic (works with or without search results)
+    if (generate_btn_pasted_text or generate_btn_all_sources) and (st.session_state.search_results or user_main_text.strip()):
+        st.session_state.generating = True
+        keywords = st.session_state.keywords.strip().split('\n')
+        keywords = [k.strip() for k in keywords if k.strip()]
         
-        if st.session_state.selected_indices or user_main_text.strip():
-            evergreen_angle = st.text_input(
-                "Evergreen Topic/Angle",
-                value="",
-                help="""You can specify the core angle or focus of your evergreen article. 
-                For instance, 'Long-term benefits of blockchain technology.'"""
-            )
-            
-            cols = st.columns([0.4, 0.6])
-            with cols[0]:
-                section_count = st.slider("Number of sections:", 2, 8, 5, key="section_count")
-            with cols[1]:
-                st.markdown(
-                    """
-                    <style>
-                    div.stButton > button {
-                        background-color: #0066FF;
-                        color: white;
-                        font-size: 1.8em;
-                        line-height: 1.8em;
-                        padding: 5px 30px 5px 30px;
-                        width: 40%;
-                    }
-                    div.stButton > button:hover {
-                        background-color: #0052CC;
-                        color: white;
-                    }
-                    </style>
-                    """, 
-                    unsafe_allow_html=True
+        selected_results = []
+        if st.session_state.search_results:
+            selected_results = [results['results'][idx] for idx in st.session_state.selected_indices]
+        
+        prepared_content = prepare_content_for_article(selected_results)
+        
+        # Append user-provided text as additional source if present
+        if user_main_text.strip():
+            prepared_content.append({
+                "url": "UserProvided",
+                "source": "User Main Text",
+                "content": user_main_text.strip()
+            })
+        
+        if prepared_content:
+            with st.spinner("Generating evergreen article..."):
+                article = generate_article(
+                    client=openai_client,
+                    transcripts=prepared_content,
+                    keywords='\n'.join(keywords) if keywords else None,
+                    evergreen_focus=evergreen_angle,
+                    section_count=section_count,
+                    promotional_text=promotional_text
                 )
-                generate_btn = st.button("Generate Evergreen Article")
+                if article:
+                    st.session_state.article = article
+                    st.success("Evergreen article generated successfully!")
+                    
+                    st.subheader("Generated Evergreen Article")
+                    st.markdown(st.session_state.article, unsafe_allow_html=True)
+                    st.download_button(
+                        label="Download Article",
+                        data=st.session_state.article,
+                        file_name="evergreen_article.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
 
-            if generate_btn:
-                st.session_state.generating = True
-                keywords = st.session_state.keywords.strip().split('\n')
-                keywords = [k.strip() for k in keywords if k.strip()]
-                
-                selected_results = [results['results'][idx] for idx in st.session_state.selected_indices]
-                prepared_content = prepare_content_for_article(selected_results)
-                
-                # Append user-provided text as additional source if present
-                if user_main_text.strip():
-                    prepared_content.append({
-                        "url": "UserProvided",
-                        "source": "User Main Text",
-                        "content": user_main_text.strip()
-                    })
-                
-                if prepared_content:
-                    with st.spinner("Generating evergreen article..."):
-                        article = generate_article(
-                            client=openai_client,
-                            transcripts=prepared_content,
-                            keywords='\n'.join(keywords) if keywords else None,
-                            evergreen_focus=evergreen_angle,
-                            section_count=section_count,
-                            promotional_text=promotional_text
-                        )
-                        if article:
-                            st.session_state.article = article
-                            st.success("Evergreen article generated successfully!")
-                            
-                            st.subheader("Generated Evergreen Article")
-                            st.markdown(st.session_state.article, unsafe_allow_html=True)
-                            st.download_button(
-                                label="Download Article",
-                                data=st.session_state.article,
-                                file_name="evergreen_article.txt",
-                                mime="text/plain",
-                                use_container_width=True
+                    image_prompt = extract_image_prompt(st.session_state.article)
+                    if image_prompt:
+                        with st.spinner("Generating image from Together AI..."):
+                            together_client = Together()
+                            response = together_client.images.generate(
+                                prompt=image_prompt,
+                                model="black-forest-labs/FLUX.1-schnell-Free",
+                                width=1200,
+                                height=800,
+                                steps=4,
+                                n=1,
+                                response_format="b64_json"
                             )
-
-                            image_prompt = extract_image_prompt(st.session_state.article)
-                            if image_prompt:
-                                with st.spinner("Generating image from Together AI..."):
-                                    together_client = Together()
-                                    response = together_client.images.generate(
-                                        prompt=image_prompt,
-                                        model="black-forest-labs/FLUX.1-schnell-Free",
-                                        width=1200,
-                                        height=800,
-                                        steps=4,
-                                        n=1,
-                                        response_format="b64_json"
-                                    )
-                                    if response and response.data and len(response.data) > 0:
-                                        b64_data = response.data[0].b64_json
-                                        st.image(
-                                            "data:image/png;base64," + b64_data,
-                                            caption=image_prompt
-                                        )
-                                    else:
-                                        st.error("Failed to generate image from Together AI.")
-                        else:
-                            st.error("Failed to generate article. Please try again.")
+                            if response and response.data and len(response.data) > 0:
+                                b64_data = response.data[0].b64_json
+                                st.image(
+                                    "data:image/png;base64," + b64_data,
+                                    caption=image_prompt
+                                )
+                            else:
+                                st.error("Failed to generate image from Together AI.")
+                else:
+                    st.error("Failed to generate article. Please try again.")
 
 def run_app():
     main()
