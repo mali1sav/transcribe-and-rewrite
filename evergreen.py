@@ -205,10 +205,10 @@ def generate_article(client: OpenAI, transcripts, keywords=None, evergreen_focus
         if is_additional_text_only:
             if needs_condensing:
                 prompt = f"""
-Adapt and translate the following content into a comprehensive article in Thai. 
+Adapt and translate the following content into a comprehensive article in Thai (keep technical terms and entities in English but the rest should be in Thai). 
 Focus on improving readability and structure while preserving the original key points. 
-Integrate the provided keywords naturally and ensure the article is approximately 2000 words by prioritizing key aspects of the pasted content.
-Reference sources naturally e.g. use the Brand Name as a clickable hyperlink to the source webpage
+Integrate the provided keywords naturally and ensure to keep the original length while prioritizing key aspects of the pasted content.
+Reference sources naturally e.g. use the Brand Name as a clickable markdown hyperlink to the source webpage like this: ([brand name](url)).
 
 Primary Keyword: {primary_keyword}
 Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
@@ -217,13 +217,13 @@ Content to adapt:
 {transcripts[0]['content']}
 
 Instructions:
-1. Translate the content into Thai.
+1. Translate the content into Thai (keep technical terms and entities in English but the rest should be in Thai).
 2. Adjust the structure for better readability.
 3. Integrate keywords naturally.
 4. Prioritize key aspects of the pasted content to condense it to approximately 2000 words.
 5. Provide the following components in Thai:
    - Title
-   - Main Content (with {section_count} sections)
+   - Main Content (with {section_count} sections), ensure each section heading is engaging
    - บทสรุป
    - Excerpt for WordPress
    - Title & H1 Options
@@ -239,7 +239,7 @@ Note: The main content should remain the priority (~90% focus). If promotional c
                 prompt = f"""
 Adapt and translate the following content into a comprehensive, evergreen-style article in Thai. 
 Focus on improving readability by structuring content while preserving the original key points. 
-Integrate the provided keywords naturally and ensure the article reaches approximately 2000 words.
+Integrate the provided keywords naturally and ensure to keep the original length while prioritizing key aspects of the pasted content.
 
 Primary Keyword: {primary_keyword}
 Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else 'none'}
@@ -251,10 +251,10 @@ Instructions:
 1. Translate the content into Thai.
 2. For better readability, Adjust the structure by choosing appropriate headings, paragraphs, lists or table.
 3. Integrate keywords naturally.
-4. Ensure the article reaches 2000 words. If it doesn't, continue expanding on the content without concluding.
-5. Provide the following components in Thai:
-   - Title
-   - Main Content (with {section_count} sections)
+4. Keep the original length.
+5. Provide the following components in Thai (keep technical terms and entities in English but the rest should be in Thai):
+   - Title - ensure it's engaging and click-worthy
+   - Main Content (with {section_count} sections). Ensure each section heading is engaging for the crypto news reader
    - บทสรุป
    - Excerpt for WordPress
    - Title & H1 Options
@@ -268,26 +268,26 @@ Note: The main content should remain the priority (~90% focus). If promotional c
 """
         else:
             prompt = f"""
-Write a comprehensive, evergreen-style article in Thai with these components: 
+Write a comprehensive, evergreen-style article in Thai with these components (keep technical terms and entities in English but the rest should be in Thai): 
 (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
 Then provide an Image Prompt in English describing the scene in 1-2 sentences.
 
 Focus the article's perspective on this evergreen angle or topic: {evergreen_focus or ""}.
 
 In the main content:
-* Create {section_count} unique section headings in Thai for the main content
-* For each section, provide a thorough and detailed exploration of the topic. Use at least four detailed paragraphs per section, each containing specific examples, data points, and case studies. If it hasn't reached four paragraphs, do not conclude the section. Try to add more paragraphs and word count as you go.
-* Ensure the article reaches 2000 words. If it doesn't, continue expanding on the content without concluding.
+* Create {section_count} unique, engaging, and semantically relevant H2 section headings in Thai for the main content. 
+* For each section, provide a thorough and detailed exploration of the topic. Use at least 3 detailed paragraphs per section, each containing specific examples, data points, and case studies. If it hasn't reached four paragraphs, do not conclude the section. Try to add more paragraphs and word count as you go.
+* Ensure the article reaches approximately 1800 words. If it doesn't, continue expanding on the content without concluding.
 * If the content contains numbers that represent monetary values, remove $ signs and add "ดอลลาร์" after each number with a single space
-* When referencing sources, naturally integrate the Brand Name as a clickable hyperlink to the source webpage
+* When referencing sources, naturally integrate the web Brand Name as a clickable markdown hyperlink to the source webpage like this: ([brand name](url)).
 
 Excerpt for WordPress: 1 sentence in Thai giving a quick overview of the article.
 
-Title & H1 Options in Thai under 60 characters. Meta Description Options in Thai under 160 characters with the primary keyword. Make them engaging and evergreen.
+Title & H1 Options in Thai under 60 characters. Meta Description Options in Thai under 160 characters with the primary keyword. Make them engaging and cliick-worthy.
 
 Finally, provide an Image Prompt in English describing a scene that fits this article.
 
-If there is promotional content provided below, seamlessly blend it into roughly 10% of the final article. The main news content (including any user-pasted main text) should remain the priority (~90% focus), but do a smooth transition into promotional text.
+If there is promotional content provided below, seamlessly blend it into roughly 10% of the final article. The main news content (including any user-pasted main text) should remain the priority (~90% focus), but do a smooth transition into promotional text, ensure it's engaging and semantically relevant.
 
 Promotional Text (optional):
 {promotional_text or ""}
@@ -308,10 +308,10 @@ Sources:
                 prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
 
         completion = client.chat.completions.create(
-            model="openai/gpt-4o-2024-11-20",
+            model="google/gemini-2.0-flash-thinking-exp:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
-            max_tokens=10000,
+            max_tokens=1000000,
             top_p=0.9,
             frequency_penalty=0.2,
             presence_penalty=0.2,

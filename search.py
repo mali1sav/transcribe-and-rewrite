@@ -54,7 +54,7 @@ def init_openai_client():
         st.error(f"Failed to initialize OpenAI client: {str(e)}")
         return None
 
-def perform_exa_search(exa_client, query, num_results=5, hours_back=24, categories=None):
+def perform_exa_search(exa_client, query, num_results=7, hours_back=24, categories=None):
     try:
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(hours=hours_back)
@@ -380,10 +380,10 @@ Here are the sources to base the article on:
             prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
 
         completion = client.chat.completions.create(
-            model="openai/gpt-4o-2024-11-20",
+            model="google/gemini-2.0-flash-thinking-exp:free",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
-            max_tokens=9000,
+            max_tokens=1000000,
             top_p=1,
             frequency_penalty=0,
             presence_penalty=0,
