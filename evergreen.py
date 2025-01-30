@@ -14,6 +14,7 @@ import unicodedata
 import json
 import base64
 from together import Together
+import tenacity
 
 load_dotenv()
 
@@ -180,10 +181,47 @@ def prepare_content_for_article(selected_results):
         st.error(f"Error preparing content: {str(e)}")
         return None
 
+@tenacity.retry(
+    stop=tenacity.stop_after_attempt(3),
+    wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
+    retry_error_callback=lambda retry_state: None
+)
+def make_openai_request(client, prompt, model="deepseek/deepseek-r1-distill-llama-70b", temp=0.6):
+    """Make OpenAI API request with retries and proper error handling"""
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temp,
+            max_tokens=1000000,
+            top_p=0.9,
+            frequency_penalty=0.2,
+            presence_penalty=0.2,
+            extra_headers={
+                "HTTP-Referer": "https://github.com/cascade",
+                "X-Title": "Cascade"
+            }
+        )
+        
+        if not completion or not completion.choices:
+            raise ValueError("Empty response received from API")
+            
+        if not completion.choices[0].message or not completion.choices[0].message.content:
+            raise ValueError("No content in API response")
+            
+        return completion.choices[0].message.content
+            
+    except httpx.TimeoutException:
+        st.error("Request timed out. Please try again.")
+        raise
+    except httpx.RequestError as e:
+        st.error(f"Network error occurred: {str(e)}")
+        raise
+    except Exception as e:
+        st.error(f"API request failed: {str(e)}")
+        raise
+
 def generate_article(client: OpenAI, transcripts, keywords=None, evergreen_focus=None, section_count=3, promotional_text=None):
-    """
-    Prompt focusing on evergreen content instead of news.
-    """
     try:
         if not transcripts:
             return None
@@ -307,73 +345,50 @@ Sources:
             for t in transcripts:
                 prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{t['content']}\n\n"
 
-        completion = client.chat.completions.create(
-            model="google/gemini-2.0-flash-thinking-exp:free",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
-            max_tokens=1000000,
-            top_p=0.9,
-            frequency_penalty=0.2,
-            presence_penalty=0.2,
-            extra_headers={
-                "HTTP-Referer": "https://github.com/cascade",
-                "X-Title": "Cascade"
-            }
-        )
+        # Make initial API request
+        content = make_openai_request(client, prompt)
+        if not content:
+            return None
+            
+        # Replace "$" with " ดอลลาร์"
+        content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
         
-        if completion.choices and len(completion.choices) > 0:
-            content = completion.choices[0].message.content
-            
-            # Replace "$" with " ดอลลาร์"
-            content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
-            
-            # Ensure the article reaches approximately 2000 words
-            word_count = len(content.split())
-            if word_count < 2000 and not needs_condensing:
-                additional_prompt = f"""
+        # Ensure the article reaches approximately 2000 words
+        word_count = len(content.split())
+        if word_count < 2000 and not needs_condensing:
+            additional_prompt = f"""
 The article is currently {word_count} words long. Please continue expanding on the content to reach 2000 words. 
 Focus on adding more detailed paragraphs, examples, and case studies without concluding the article.
 """
-                additional_completion = client.chat.completions.create(
+            try:
+                additional_content = make_openai_request(
+                    client, 
+                    additional_prompt, 
                     model="openai/gpt-4o-2024-11-20",
-                    messages=[{"role": "user", "content": additional_prompt}],
-                    temperature=0.6,
-                    max_tokens=10000,
-                    top_p=0.9,
-                    frequency_penalty=0.2,
-                    presence_penalty=0.2,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/cascade",
-                        "X-Title": "Cascade"
-                    }
+                    temp=0.6
                 )
-                if additional_completion.choices and len(additional_completion.choices) > 0:
-                    additional_content = additional_completion.choices[0].message.content
-                    content += "\n" + additional_content
-            elif word_count > 2000 and needs_condensing:
-                condensing_prompt = f"""
+                if additional_content:
+                    content += "\n\n" + additional_content
+            except Exception as e:
+                st.warning(f"Failed to expand article content: {str(e)}")
+                # Continue with original content if expansion fails
+        
+        elif word_count > 2000 and needs_condensing:
+            condensing_prompt = f"""
 The article is currently {word_count} words long. Please condense it to approximately 2000 words by prioritizing key aspects of the pasted content.
 """
-                condensing_completion = client.chat.completions.create(
+            try:
+                content = make_openai_request(
+                    client, 
+                    condensing_prompt, 
                     model="openai/gpt-4o-2024-11-20",
-                    messages=[{"role": "user", "content": condensing_prompt}],
-                    temperature=0.6,
-                    max_tokens=10000,
-                    top_p=0.9,
-                    frequency_penalty=0.2,
-                    presence_penalty=0.2,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/cascade",
-                        "X-Title": "Cascade"
-                    }
+                    temp=0.6
                 )
-                if condensing_completion.choices and len(condensing_completion.choices) > 0:
-                    content = condensing_completion.choices[0].message.content
-            
-            return content
-        else:
-            st.error("No valid response content received")
-            return None
+            except Exception as e:
+                st.warning(f"Failed to condense article content: {str(e)}")
+                # Continue with original content if condensing fails
+        
+        return content
 
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")

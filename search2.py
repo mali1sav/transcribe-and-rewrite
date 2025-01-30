@@ -1,21 +1,46 @@
 import os
 import pytz
+from tavily import TavilyClient
 from datetime import datetime, timedelta, timezone
 import streamlit as st
 from urllib.parse import urlparse
 from exa_py import Exa
-import httpx
 from dateutil import parser
 from dotenv import load_dotenv
+from openai import OpenAI
 import re
-import html
-import unicodedata
 import json
 import base64
 from together import Together
-import google.generativeai as genai
-import time
-import tenacity
+
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+def serialize_search_results(search_results):
+    if not search_results:
+        return {"results": []}
+        
+    def format_date(date):
+        if isinstance(date, datetime):
+            return date.isoformat()
+        return str(date) if date else ""
+        
+    serialized_results = {
+        "results": [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "text": r.get("text", r.get("content", "")),  # Support both text and content fields
+                "published_date": format_date(r.get("published_date")),
+                "source": r.get("source", "")
+            }
+            for r in search_results
+        ]
+    }
+    return serialized_results
 
 load_dotenv()
 
@@ -75,115 +100,101 @@ def make_gemini_request(client, prompt):
                 st.warning(f"Retrying Gemini request (attempt {attempt + 2}/3)...")
                 time.sleep(2 ** attempt)  # Exponential backoff
                 
-        raise Exception("Failed to get valid response from Gemini API after all retries")
+        raise ValueError("Failed to get valid response from Gemini API after retries")
             
     except Exception as e:
-        st.error(f"Error making Gemini request: {str(e)}")
+        st.error(f"Gemini API error: {str(e)}")
+        st.error("Retrying request...")
         raise
 
-def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
+def perform_exa_search(exa_client, query, num_results=12, hours_back=24):
+    """Simple Exa search function that returns news articles from the past hours_back hours"""
     try:
+        # Calculate time range
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(hours=hours_back)
         
-        start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
-        end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
+        # Make the API request
         response = exa_client.search_and_contents(
             query=query,
             num_results=num_results,
-            start_published_date=start_date_str,
-            end_published_date=end_date_str,
+            start_published_date=start_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            end_published_date=end_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
             type='auto',
-            category='news',
+            use_autoprompt=True,
             text=True
         )
         
-        if not response:
-            return []
-            
-        results = getattr(response, 'results', None) or response
+        # Process results
         all_results = []
-        
-        excluded_domains = ['twitter.com', 'youtube.com', 'youtu.be']
-        
-        for result in results:
-            # Get URL and check against excluded domains
-            url = str(getattr(result, 'url', '') or '')
-            domain = get_domain(url)
-            if any(excluded in domain for excluded in excluded_domains):
-                continue
+        if response and hasattr(response, 'results'):
+            for result in response.results:
+                # Skip if no text content
+                if not hasattr(result, 'text') or not result.text:
+                    continue
+                    
+                # Get basic fields
+                url = getattr(result, 'url', '')
+                source = get_domain(url)
                 
-            title = str(getattr(result, 'title', 'No Title') or 'No Title')
-            text = str(getattr(result, 'text', '') or '')
-            
-            # Parse date if available
-            published_date = None
-            if hasattr(result, 'published_date') and result.published_date:
-                try:
-                    parsed = parser.parse(result.published_date)
-                    if not parsed.tzinfo:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    published_date = parsed.isoformat()
-                except:
-                    pass
-            
-            transformed_result = {
-                'title': title,
-                'url': url,
-                'published_date': published_date,
-                'text': text,
-                'source': domain
-            }
-            all_results.append(transformed_result)
-            
+                # Skip Twitter results
+                if 'twitter.com' in source.lower():
+                    continue
+                    
+                # Parse date
+                published_date = None
+                if hasattr(result, 'published_date') and result.published_date:
+                    try:
+                        parsed = parser.parse(result.published_date)
+                        published_date = parsed.replace(tzinfo=timezone.utc).isoformat() if not parsed.tzinfo else parsed.isoformat()
+                    except:
+                        pass
+                
+                # Format result
+                all_results.append({
+                    'title': getattr(result, 'title', 'No Title'),
+                    'url': url,
+                    'text': str(result.text),
+                    'source': source,
+                    'published_date': published_date
+                })
+        
+        # Sort by date and limit results
+        all_results.sort(
+            key=lambda x: parser.parse(x['published_date']) if x['published_date'] else datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True
+        )
+        all_results = all_results[:num_results]
+        
         if all_results:
             st.success(f"✅ Found {len(all_results)} results from Exa")
-            
+        
         return all_results
         
     except Exception as e:
         st.error(f"Error during Exa search: {str(e)}")
         return []
 
-def perform_web_research(exa_client, query, hours_back, search_engines=None):
-    """
-    Perform web research using available search engines.
-    Currently using Exa for comprehensive search results.
-    """
+def perform_web_research(exa_client, query, hours_back, search_engines):
     results = []
+    search_status = []
     
     try:
-        # Get results from Exa
-        exa_results = perform_exa_search(
-            exa_client=exa_client,
-            query=query,
-            hours_back=hours_back
-        )
-        if exa_results:
-            results.extend(exa_results)
-            
-        return results
+        if "Exa" in search_engines:
+            exa_results = perform_exa_search(exa_client, query, num_results=10, hours_back=hours_back)
+            if exa_results:
+                results.extend(exa_results)
+                search_status.append(f"✅ Found {len(exa_results)} results from Exa")
+            else:
+                search_status.append("❌ No results from Exa")
     except Exception as e:
-        st.error(f"Error during web research: {str(e)}")
-        return []
-
-def serialize_search_results(search_results):
-    if not search_results:
-        return {"results": []}
-    serialized_results = {
-        "results": [
-            {
-                "title": r["title"],
-                "url": r["url"],
-                "text": r["text"],
-                "published_date": r["published_date"],
-                "source": r["source"]
-            }
-            for r in search_results
-        ]
-    }
-    return serialized_results
+        st.error(f"❌ Exa search failed: {str(e)}")
+    
+    # Display consolidated status
+    for status in search_status:
+        st.write(status)
+    
+    return results
 
 def prepare_content_for_article(selected_results):
     """Takes a list of results, each with 'url','source','text', and returns a 'transcript' list for GPT."""
@@ -205,7 +216,22 @@ def prepare_content_for_article(selected_results):
         st.error(f"Error preparing content: {str(e)}")
         return None
 
-def generate_article(client: dict, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
+def clean_markdown(text):
+    """Clean up any raw markdown or HTML from text"""
+    import re
+    
+    # Remove HTML-style links
+    text = re.sub(r'<a href="[^"]*">[^<]*</a>', lambda m: m.group(0).split('>')[1].split('<')[0], text)
+    
+    # Remove markdown links while keeping the text
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    return text.strip()
+
+def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
     try:
         if not transcripts:
             return None
@@ -225,74 +251,14 @@ def generate_article(client: dict, transcripts, keywords=None, news_angle=None, 
         }
         
         prompt = f"""
-Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), use one of the relevant guidelines below:
-1. Use power words that evoke emotion in Thai (examples: "ทะลุเป้า!" "ทุปสถิติใหม่!", "เปิดโผ!"), ensure correct grammar and punctuation according to Thai sentnence structure, particularly news-like headlines
-2. Include specific numbers/stats when relevant (examples: "10 เท่า!", "5 เหรียญ Meme ที่อาจพุ่ง 1000%")
-3. Create curiosity gaps (examples:"เบื้องหลังการพุ่งทะยานของราคา...", "จับตา! สัญญาณที่บ่งชี้ว่า...")
-4. Make bold, specific statements (examples:"เหรียญคริปโตที่ดีที่สุด", "ทำไมวาฬถึงทุ่มเงินหมื่นล้านใส่...")
+เขียนบทความภาษาไทยจากข้อมูลที่ให้มา โดยมีเงื่อนไขดังนี้:
+1. ห้ามใส่ลิงก์หรือ markdown ใดๆ ในเนื้อหา
+2. เขียนในรูปแบบบทความข่าว
+3. ใช้ภาษาที่เป็นทางการ
+4. สรุปประเด็นสำคัญจากแหล่งข้อมูลทั้งหมด
+5. ความยาวประมาณ 3-4 ย่อหน้า
 
-Primary Keyword: {primary_keyword or ""}
-Secondary Keywords: {keywords or ""}
-
-# Main Content Guidelines:
-* Keep the following terms in English, rest in Thai:
-  - Technical terms
-  - Entity names
-  - People names
-  - Place names (including cities, states, countries)
-  - Organizations
-  - Company names
-  - Cryptocurrency names (use proper capitalization: "Bitcoin", not "BITCOIN" or "bitcoin")
-  - Platform names
-  - Government entities (e.g., "Illinois State", not "รัฐอิลลินอยส์")
-* Use proper capitalization for all terms:
-  - Cryptocurrencies: "Bitcoin", "Ethereum", "Solana"
-  - Companies: "Binance", "Coinbase"
-  - Organizations: "Federal Reserve", "Securities and Exchange Commission"
-  - Never use ALL CAPS unless it's a widely recognized acronym (e.g., "FBI", "SEC")
-* Citation format:
-  - When referencing a source, use this exact format in Thai sentence structure:
-    - End the sentence with "(อ้างอิง: [Source Name](url))"
-    - Example: "ราคา Bitcoin พุ่งขึ้นแตะ 50,000 ดอลลาร์ (อ้างอิง: [Bloomberg](https://www.bloomberg.com))"
-    - Always capitalize source names properly
-    - Place the citation at the end of the relevant statement
-    - Keep the entire citation on the same line as the sentence
-* Ensure that any special characters and avoid unintended Markdown or LaTeX formatting.
-* Open with the most newsworthy aspect.
-* Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
-* For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
-* Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
-* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
-* When referencing a source, naturally integrate the Brand Name into the sentence as a clickable markdown hyperlink to the source webpage like this: [brand name](url).
-* Ensure that any special characters and avoid unintended Markdown or LaTeX formatting.
-
-# Article Structure:
-## Title
-[Your engaging title here]
-
-## Main Content
-[Your main content with H2 sections]
-
-## บทสรุป
-[Summary of key points]
-
-## Additional Elements
-- Slug URL in English (must include {primary_keyword})
-- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
-- Excerpt for WordPress: One sentence in Thai that briefly describes the article
-
-## SEO Elements (3 options each)
-1. Title (SEO best practices)
-2. Meta Description (SEO best practices)
-3. H1 (aligned with Title and Meta Description)
-- Integrate {primary_keyword} in its original form naturally in all elements
-- All elements must be engaging and news-style
-
-## Image Prompt
-[English description of a scene that fits the article, focusing on 1-2 objects]
-
-Here are the sources to base the article on:
+ข้อมูล:
 """
         # Append transcripts (which may include search results + user-provided main text)
         for t in transcripts:
@@ -322,20 +288,16 @@ Here are the sources to base the article on:
         #    A simple regex that targets something like $100,000 → 100,000 ดอลลาร์
         content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
         
-        return content
+        # Clean any markdown that might have slipped through
+        cleaned_response = clean_markdown(content)
+        return cleaned_response
+            
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return None
 
 def extract_image_prompt(article_text):
     pattern = r"(?i)Image Prompt.*?\n(.*)"
-    match = re.search(pattern, article_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
-
-def extract_alt_text(article_text):
-    pattern = r"(?i)Image ALT Text.*?\n(.*?)(?:\n\n|\Z)"
     match = re.search(pattern, article_text, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -406,12 +368,12 @@ def main():
     </style>
     """, unsafe_allow_html=True)
     
-    st.title("Search and Generate Articles")
+    st.title("🔍 Search and Generate Articles")
 
     if 'keywords' not in st.session_state:
         st.session_state.keywords = "Bitcoin"
     if 'query' not in st.session_state:
-        st.session_state.query = "Strategic Bitcoin Reserve - Latest news"
+        st.session_state.query = "Strategic Bitcoin Reserve News"
     if 'selected_indices' not in st.session_state:
         st.session_state.selected_indices = []
     if 'article' not in st.session_state:
@@ -436,7 +398,7 @@ def main():
     with st.sidebar:
         query = st.text_input("Enter your search query:", value=st.session_state.query)
         
-        hours_back = st.slider("Hours to look back:", 1, 168, 12)
+        hours_back = st.slider("Hours to look back:", 1, 168, 6)
         
         st.text_area(
             "Keywords (one per line)",
@@ -465,14 +427,16 @@ def main():
             results = perform_web_research(
                 exa_client=exa_client,
                 query=query,
-                hours_back=hours_back
+                hours_back=hours_back,
+                search_engines=["Exa"]
             )
             if results:
                 st.session_state.search_results = serialize_search_results(results)
                 st.session_state.search_results_json = json.dumps(
                     st.session_state.search_results, 
                     ensure_ascii=False, 
-                    indent=4
+                    indent=4,
+                    cls=DateTimeEncoder
                 )
             else:
                 st.warning("No results found. Try adjusting your search parameters.")
@@ -582,46 +546,37 @@ def main():
                             st.success("Article generated successfully!")
                             
                             st.subheader("Generated Article")
-                            cleaned_article = article.replace("**Title:**", "## Title")
-                            cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
-                            cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)  # Remove other ** markers
-                            st.markdown(cleaned_article)
+                            st.markdown(st.session_state.article, unsafe_allow_html=True)
                             st.download_button(
                                 label="Download Article",
-                                data=article,
-                                file_name="generated_article.md",
-                                mime="text/markdown",
+                                data=st.session_state.article,
+                                file_name="generated_article.txt",
+                                mime="text/plain",
                                 use_container_width=True
                             )
 
                             image_prompt = extract_image_prompt(st.session_state.article)
-                            alt_text = extract_alt_text(st.session_state.article)
-                            
-                            # Only proceed with image generation if we have an English prompt
                             if image_prompt:
                                 with st.spinner("Generating image from Together AI..."):
                                     together_client = Together()
-                                    try:
-                                        response = together_client.images.generate(
-                                            prompt=image_prompt,  # Only use English prompt for generation
-                                            model="black-forest-labs/FLUX.1-schnell-Free",
-                                            width=1200,
-                                            height=800,
-                                            steps=4,
-                                            n=1,
-                                            response_format="b64_json"
+                                    response = together_client.images.generate(
+                                        prompt=image_prompt,
+                                        model="black-forest-labs/FLUX.1-schnell-Free",
+                                        width=1200,
+                                        height=800,
+                                        steps=4,
+                                        n=1,
+                                        response_format="b64_json"
+                                    )
+                                    if response and response.data and len(response.data) > 0:
+                                        b64_data = response.data[0].b64_json
+                                        st.image(
+                                            "data:image/png;base64," + b64_data,
+                                            caption=image_prompt
                                         )
-                                        if response and response.data and len(response.data) > 0:
-                                            b64_data = response.data[0].b64_json
-                                            # Display image with Thai ALT text as caption
-                                            st.image(
-                                                "data:image/png;base64," + b64_data,
-                                                caption=alt_text or "Generated image"  # Use Thai ALT text or fallback to simple English caption
-                                            )
-                                        else:
-                                            st.error("Failed to generate image from Together AI.")
-                                    except Exception as e:
-                                        st.error(f"Error generating image: {str(e)}")
+                                    else:
+                                        st.error("Failed to generate image from Together AI.")
+                                    pass
                         else:
                             st.error("Failed to generate article. Please try again.")
 
