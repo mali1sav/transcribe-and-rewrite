@@ -340,16 +340,11 @@ News Angle: {news_angle or ""}
 * Maintain focus throughout the article - avoid tangents or unrelated information
 
 # Source Citation Rules:
-* CRITICAL: Each source must be cited EXACTLY ONCE in the entire article
-* When using multiple pieces of information from the same source:
-  - Group all related information from that source together in one or two consecutive paragraphs
-  - Add a SINGLE citation at the end of these paragraphs
+* CRITICAL: Each source must be cited EXACTLY ONCE in each content section
+* Add a SINGLE citation at the begining of relevant section
   - Example:
-    "ราคา Bitcoin พุ่งแตะ 60,000 ดอลลาร์ในวันนี้ ท่ามกลางความต้องการที่เพิ่มขึ้นจากนักลงทุนสถาบัน 
-    นอกจากนี้ ยังมีการคาดการณ์ว่าราคาอาจแตะ 100,000 ดอลลาร์ภายในสิ้นปี โดยมีปัจจัยสนับสนุนจากการอนุมัติ Bitcoin ETF 
-    และการเติบโตของตลาด DeFi (อ้างอิง: [Source Name](url))"
-* NEVER repeat a source citation, even if using additional information from that source later in the article
-* If you need to reference information from a source that was already cited, simply continue without adding another citation
+    "ตามรายงานจาก [Source Name](url) ราคา Bitcoin พุ่งแตะ 60,000 ดอลลาร์ในวันนี้..."
+* NEVER repeat a source citation in the same section, even if using additional information from that source later in the section
 
 # Main Content Guidelines:
 * Keep the following terms in English, rest in Thai:
@@ -388,24 +383,37 @@ News Angle: {news_angle or ""}
 
 # Article Structure:
 ## Title
-[Your engaging title here that reflects the news angle]
+[Create an engaging news-style title that includes {primary_keyword} once, maintaining its original form]
 
 ## Main Content
-[Your main content with H2 sections, each aligning semantically with the news angle]
+[First paragraph must include {primary_keyword} once in its original form]
 
-[Summary of key points emphasizing the news angle's significance]
+[Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
+
+[Write supporting paragraphs using Secondary Keywords (max 3% density - 3 mentions per 100 words)]
+
+[Conclude with a summary emphasizing the news angle's significance]
+
+## SEO Elements
+1. Title Options (include {primary_keyword} once, maintain original form):
+   - [Option 1: News-focused title]
+   - [Option 2: Number-focused title]
+   - [Option 3: Question-based title]
+
+2. Meta Description Options (include {primary_keyword} once):
+   - [Option 1: News angle + key benefit]
+   - [Option 2: Number-focused]
+   - [Option 3: Question to stimulate curiosity]
+
+3. H1 Options (aligned with Title and Meta Description):
+   - [Option 1: Direct news statement]
+   - [Option 2: Number-focused statement]
+   - [Option 3: Engaging question]
 
 ## Additional Elements
 - Slug URL in English (must include {primary_keyword})
 - Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
-
-## SEO Elements (3 options each)
-1. Title (SEO best practices, incorporating the news angle)
-2. Meta Description (SEO best practices, incorporating the news angle)
-3. H1 (aligned with Title and Meta Description)
-- Integrate {primary_keyword} in its original form naturally in all elements
-- All elements must be engaging and news-style
 
 ## Image Prompt
 [Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Don't include anything from promotional content. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.]
@@ -522,38 +530,19 @@ def main():
 
     # Sidebar for inputs and controls
     with st.sidebar:
-        query = st.text_input("Enter your search query:", value=st.session_state.query)
+        content_source = st.radio(
+            "How would you like to generate your article?",
+            ["Search and Generate", "Generate from URLs"],
+            key="content_source"
+        )
         
-        hours_back = st.slider("Hours to look back:", 1, 168, 12)
-        
+        # Common elements that always appear
         st.text_area(
             "Keywords (one per line)",
             height=68,
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
-        
-        user_main_text = st.text_area(
-            "URLs to Extract",
-            height=100,
-            help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed to extract its content using Firecrawl or Gemini."
-        )
-        
-        promotional_content = load_promotional_content()
-        
-        # Initialize session state for selected promotions if not exists
-        if 'selected_promotions' not in st.session_state:
-            st.session_state.selected_promotions = []
-        
-        # Create checkboxes for each promotional content
-        selected_promotions = []
-        st.sidebar.markdown("### Select promotional content to include:")
-        for name in sorted(promotional_content.keys()):
-            if st.sidebar.checkbox(name, key=f"promo_{name}"):
-                selected_promotions.append(promotional_content[name])
-        
-        # Combine selected promotional content
-        promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
         
         news_angle = st.text_input(
             "News Angle",
@@ -563,26 +552,23 @@ def main():
         )
 
         section_count = st.slider("Number of sections:", 2, 8, 3, key="section_count")
-
-        # Add option for direct URL generation
-        if st.button("Generate Article from URLs", type="primary"):
-            if not user_main_text.strip():
-                with messages_placeholder:
-                    st.error("Please enter at least one URL in the Additional Content box")
-            else:
-                st.session_state.generating = True
-                st.session_state.selected_indices = []  # Clear any previous selections
-                st.session_state.process_urls = True
-                st.session_state.urls_to_process = user_main_text.strip()
-                with messages_placeholder:
-                    st.info("Starting content extraction...")
         
-        st.write("Or")
+        # Promotional content selection
+        promotional_content = load_promotional_content()
+        st.write("Promotional Content")
+        selected_promotions = []
+        for name in sorted(promotional_content.keys()):
+            if st.checkbox(name, key=f"promo_{name}"):
+                selected_promotions.append(promotional_content[name])
+        promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
         
-        if st.button("Search Content", type="primary"):
-            if query:
-                with messages_placeholder:
-                    st.info("Searching...")
+        # Source-specific inputs
+        if content_source == "Search and Generate":
+            query = st.text_input("Enter your search query:", value=st.session_state.query)
+            hours_back = st.slider("Hours to look back:", 1, 168, 12)
+            
+            if st.button("Search Content", type="primary"):
+                st.session_state.process_urls = False
                 results = perform_web_research(
                     exa_client=exa_client,
                     query=query,
@@ -599,6 +585,23 @@ def main():
                     with messages_placeholder:
                         st.error("No results found. Try adjusting your search parameters.")
 
+        else:  # Generate from URLs
+            user_main_text = st.text_area(
+                "URLs to Extract",
+                height=100,
+                help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed to extract its content using Firecrawl or Gemini."
+            )
+            
+            if st.button("Generate Article from URLs", type="primary"):
+                if not user_main_text.strip():
+                    with messages_placeholder:
+                        st.error("Please enter at least one URL in the URLs to Extract box")
+                else:
+                    st.session_state.generating = True
+                    st.session_state.selected_indices = []  # Clear any previous selections
+                    st.session_state.process_urls = True
+                    st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
+                    
     # Main area for displaying status and content
     
     # Show search results first if available
@@ -658,7 +661,7 @@ def main():
                     })
                 
                 # Add additional content if provided
-                if user_main_text.strip():
+                if content_source == "Generate from URLs":
                     additional_content = []
                     for line in user_main_text.strip().split('\n'):
                         line = line.strip()
@@ -721,24 +724,19 @@ def main():
     if st.session_state.process_urls and st.session_state.urls_to_process:
         # Process URLs
         additional_content = []
-        for line in st.session_state.urls_to_process.split('\n'):
-            line = line.strip()
-            if line.startswith('http://') or line.startswith('https://'):
-                try:
-                    extracted = extract_url_content(gemini_client, line, messages_placeholder)
-                    if extracted:
-                        additional_content.append(extracted)
-                        with messages_placeholder:
-                            st.success(f"Successfully extracted content from {line}")
-                    else:
-                        with messages_placeholder:
-                            st.error(f"Both Firecrawl and Gemini failed to extract content from {line}")
-                except Exception as e:
+        for line in st.session_state.urls_to_process:
+            try:
+                extracted = extract_url_content(gemini_client, line, messages_placeholder)
+                if extracted:
+                    additional_content.append(extracted)
                     with messages_placeholder:
-                        st.error(f"Error extracting content from {line}: {str(e)}")
-            elif line:  # If it's not a URL, show an error
+                        st.success(f"Successfully extracted content from {line}")
+                else:
+                    with messages_placeholder:
+                        st.error(f"Both Firecrawl and Gemini failed to extract content from {line}")
+            except Exception as e:
                 with messages_placeholder:
-                    st.error(f"Invalid input: '{line}' is not a valid URL. Please enter only URLs starting with http:// or https://")
+                    st.error(f"Error extracting content from {line}: {str(e)}")
 
         if additional_content:
             prepared_content = []
