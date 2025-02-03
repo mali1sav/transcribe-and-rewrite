@@ -376,6 +376,16 @@ News Angle: {news_angle or ""}
 * If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
 * When referencing a source, naturally integrate the Brand Name into the sentence as a clickable markdown hyperlink to the source webpage like this: [brand name](url).
 
+**Promotional Integration Guidelines**
+----------------------------------------
+{promotional_text if promotional_text else ''}
+
+* Requirements:
+  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English)
+  2. Transit seamlessly from the main content into the promotional text. 
+  3. Find a way to mention {primary_keyword} in a seamless way
+  4. Limit promotional text to 120 words, placed at the end of the article.
+
 # Article Structure:
 ## Title
 [Your engaging title here that reflects the news angle]
@@ -398,7 +408,12 @@ News Angle: {news_angle or ""}
 - All elements must be engaging and news-style
 
 ## Image Prompt
-[English description of a scene that fits the article, focusing on 1-2 objects]
+[Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Don't include anything from promotional content. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.]
+
+# Source Usage Instructions:
+* Use provided sources as primary reference for facts and data
+* Your knowledge can supplement for context and understanding, but never override source information
+* When source information exists on a topic, it takes precedence over general knowledge
 
 Here are the sources to base the article on:
 """
@@ -434,6 +449,26 @@ Here are the sources to base the article on:
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return None
+
+def load_promotional_content():
+    """Load promotional content from files in the pr directory."""
+    pr_dir = os.path.join(os.path.dirname(__file__), 'pr')
+    content_map = {}
+    
+    if os.path.exists(pr_dir):
+        for filename in os.listdir(pr_dir):
+            if filename.endswith('.txt'):
+                filepath = os.path.join(pr_dir, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        # Use filename without extension as key
+                        name = os.path.splitext(filename)[0]
+                        content_map[name] = content
+                except Exception as e:
+                    print(f"Error loading {filename}: {str(e)}")
+    
+    return content_map
 
 def extract_image_prompt(article_text):
     pattern = r"(?i)Image Prompt.*?\n(.*)"
@@ -504,12 +539,22 @@ def main():
             help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed to extract its content using Firecrawl or Gemini."
         )
         
-        promotional_text = st.text_area(
-            "Promotional Text (Optional)",
-            height=100,
-            help="Paste any promotional content or CTA you want appended (about 10% weighting)."
-        )
-
+        promotional_content = load_promotional_content()
+        
+        # Initialize session state for selected promotions if not exists
+        if 'selected_promotions' not in st.session_state:
+            st.session_state.selected_promotions = []
+        
+        # Create checkboxes for each promotional content
+        selected_promotions = []
+        st.sidebar.markdown("### Select promotional content to include:")
+        for name in sorted(promotional_content.keys()):
+            if st.sidebar.checkbox(name, key=f"promo_{name}"):
+                selected_promotions.append(promotional_content[name])
+        
+        # Combine selected promotional content
+        promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
+        
         news_angle = st.text_input(
             "News Angle",
             value="",
@@ -709,13 +754,15 @@ def main():
                     st.info("Generating article...")
                 # Get keywords as a list directly from the text area
                 keywords = [k.strip() for k in st.session_state.keywords.split('\n') if k.strip()]
+                # Ensure promotional text is properly handled
+                promo_text = promotional_text.strip() if promotional_text else None
                 article = generate_article(
                     client=gemini_client,
                     transcripts=prepared_content,
                     keywords=keywords,
                     news_angle=news_angle if news_angle.strip() else None,
                     section_count=section_count,
-                    promotional_text=promotional_text if promotional_text.strip() else None
+                    promotional_text=promo_text
                 )
                 if article:
                     st.session_state.article = article
