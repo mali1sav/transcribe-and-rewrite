@@ -322,7 +322,7 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
 When creating section headings (H2) and subheadings (H3), use one of the relevant guidelines below:
-1. Use power words that often in appear in Thai crypto news headline (examples: "ทะลุเป้า!" "ทุปสถิติใหม่!", "เปิดโผ!"). These are just examples, feel free to use other words that are more appropriate
+1. Use power words that often in appear in Thai crypto news headline. Choose words that best fit the specific news context.
 2. Include specific numbers/stats when relevant (examples: "10 เท่า!", "5 เหรียญ Meme ที่อาจพุ่ง 1000%")
 3. Create curiosity gaps (examples:"เบื้องหลังการพุ่งทะยานของราคา...", "จับตา! สัญญาณที่บ่งชี้ว่า...")
 4. Make bold, specific statements (examples:"เหรียญคริปโตที่ดีที่สุด", "ทำไมวาฬถึงทุ่มเงินหมื่นล้านใส่...")
