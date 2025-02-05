@@ -310,6 +310,7 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         # Keywords should already be a list from the text area split
         keyword_list = keywords if keywords else []
         primary_keyword = keyword_list[0].upper() if keyword_list else ""
+        secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
         
         shortcode_map = {
             "BITCOIN": '[latest_articles label="ข่าว Bitcoin (BTC) ล่าสุด" count_of_posts="6" taxonomy="category" term_id="7"]',
@@ -340,11 +341,20 @@ News Angle: {news_angle or ""}
 * Maintain focus throughout the article - avoid tangents or unrelated information
 
 # Source Citation Rules:
-* CRITICAL: Each source must be cited EXACTLY ONCE in each content section
-* Add a SINGLE citation at the begining of relevant section
-  - Example:
-    "ตามรายงานจาก [Source Name](url) ราคา Bitcoin พุ่งแตะ 60,000 ดอลลาร์ในวันนี้..."
-* NEVER repeat a source citation in the same section, even if using additional information from that source later in the section
+* CRITICAL: Each source must be cited EXACTLY ONCE at the beginning of each section
+* EVERY section MUST start with "ตามรายงานจาก" followed by the source citation
+* Citation format is STRICTLY required as: "ตามรายงานจาก [PUBLICATION_NAME](SOURCE_URL) ..." where:
+  - PUBLICATION_NAME is the actual source name (e.g. Forbes, Bloomberg, CoinDesk)
+  - SOURCE_URL is the full URL to the source
+  - The source name must be a clickable markdown hyperlink
+* Example of correct citation:
+  "ตามรายงานจาก [Forbes](https://forbes.com/article) Jerome Powell ประธาน Federal Reserve..."
+* Example of incorrect citations:
+  - "Forbes รายงานว่า..." (Missing ตามรายงานจาก and hyperlink)
+  - "[Forbes] Jerome Powell..." (Missing ตามรายงานจาก)
+  - "ตามรายงานจาก Forbes..." (Missing hyperlink)
+* NEVER repeat a source citation in the same section
+* NEVER use placeholder text - always use the actual publication name
 
 # Main Content Guidelines:
 * Keep the following terms in English, rest in Thai:
@@ -364,22 +374,24 @@ News Angle: {news_angle or ""}
   - Never use ALL CAPS unless it's a widely recognized acronym (e.g., "FBI", "SEC")
 
 * Ensure to avoid unintended Markdown or LaTeX formatting.
-* Open with the most newsworthy aspect that aligns with the news angle.
 * Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
 * For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
 * Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
 * If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
-* When referencing a source, naturally integrate the Brand Name into the sentence as a clickable markdown hyperlink to the source webpage like this: [brand name](url).
 
+# Promotional Content Guidelines
+{f'''
 **Promotional Integration Guidelines**
 ----------------------------------------
-{promotional_text if promotional_text else ''}
+{promotional_text}
 
 * Requirements:
-  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English)
-  2. Transit seamlessly from the main content into the promotional text. 
-  3. Find a way to mention {primary_keyword} in a seamless way
-  4. Limit promotional text to 120 words, placed at the end of the article.
+  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English but the rest of sentence in Thai).
+  2. The content must be in Thai (keep technical terms and entity names in English but the rest in Thai).
+  3. Transit seamlessly from the main content into the promotional text.
+  4. Find a way to mention {primary_keyword} in a seamless way.
+  5. Limit promotional text to 120 words, placed at the end of the article.
+''' if promotional_text else ''}
 
 # Article Structure:
 ## Title
@@ -390,9 +402,9 @@ News Angle: {news_angle or ""}
 
 [Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
 
-[Write supporting paragraphs using Secondary Keywords (max 3% density - 3 mentions per 100 words)]
+[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally]
 
-[Conclude with a summary emphasizing the news angle's significance]
+[Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
 
 ## SEO Elements
 1. Title Options (include {primary_keyword} once, maintain original form):
@@ -405,13 +417,13 @@ News Angle: {news_angle or ""}
    - [Option 2: Number-focused]
    - [Option 3: Question to stimulate curiosity]
 
-3. H1 Options (aligned with Title and Meta Description):
+3. H1 Options (aligned with Title and Meta Description including {primary_keyword}):
    - [Option 1: Direct news statement]
    - [Option 2: Number-focused statement]
    - [Option 3: Engaging question]
 
 ## Additional Elements
-- Slug URL in English (must include {primary_keyword})
+Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
 - Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
