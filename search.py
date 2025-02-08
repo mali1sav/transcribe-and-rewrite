@@ -327,6 +327,7 @@ When creating section headings (H2) and subheadings (H3), use one of the relevan
 2. Include specific numbers/stats when relevant (examples: "10 เท่า!", "5 เหรียญ Meme ที่อาจพุ่ง 1000%")
 3. Create curiosity gaps (examples:"เบื้องหลังการพุ่งทะยานของราคา...", "จับตา! สัญญาณที่บ่งชี้ว่า...")
 4. Make bold, specific statements (examples:"เหรียญคริปโตที่ดีที่สุด", "ทำไมวาฬถึงทุ่มเงินหมื่นล้านใส่...")
+The above guidelines are just examples. You must choose your own words or modify them to fit the context of the article.
 
 Primary Keyword: {primary_keyword or ""}
 Secondary Keywords: {keywords or ""}
@@ -341,22 +342,9 @@ News Angle: {news_angle or ""}
 * Maintain focus throughout the article - avoid tangents or unrelated information
 
 # Source Citation Rules:
-* CRITICAL: Each source must be cited EXACTLY ONCE at the beginning of each section
-* EVERY section MUST start with "ตามรายงานจาก" followed by the source citation
-* Citation format is STRICTLY required as: "ตามรายงานจาก [PUBLICATION_NAME](SOURCE_URL) ..." where:
-  - PUBLICATION_NAME is the actual source name (e.g. Forbes, Bloomberg, CoinDesk)
-  - SOURCE_URL is the full URL to the source
-  - The source name must be a clickable markdown hyperlink
-* Example of correct citation:
-  "ตามรายงานจาก [Forbes](https://forbes.com/article) Jerome Powell ประธาน Federal Reserve..."
-* Example of incorrect citations:
-  - "Forbes รายงานว่า..." (Missing ตามรายงานจาก and hyperlink)
-  - "[Forbes] Jerome Powell..." (Missing ตามรายงานจาก)
-  - "ตามรายงานจาก Forbes..." (Missing hyperlink)
-* NEVER repeat a source citation in the same section
-* NEVER use placeholder text - always use the actual publication name
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article, and be embedded in the intro section in a natural, contextual manner, using markdown hyperlinks such as this: (อ้างอิง ([source name](url)))
 
-# Main Content Guidelines:
+# Main Content (also applicable to H1,H2, Title, and Meta Description) Guidelines:
 * Keep the following terms in English, rest in Thai:
   - Technical terms
   - Entity names
@@ -402,7 +390,8 @@ News Angle: {news_angle or ""}
 
 [Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
 
-[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally]
+[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. Do not repeat the same source attribution more than once in the entire article.
+]
 
 [Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
 
@@ -437,9 +426,15 @@ Slug URL in English (must include {primary_keyword}; translate Thai keywords to 
 
 Here are the sources to base the article on:
 """
-        # Append transcripts with escaped special characters
+        # Append transcripts with escaped special characters, ensuring each source attribution appears only once
+        seen_sources = set()
         for t in transcripts:
-            prompt += f"### Content from {t['source']}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
+            source = t['source']
+            if source not in seen_sources:
+                seen_sources.add(source)
+                prompt += f"### Content from {source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
+            else:
+                prompt += f"{escape_special_chars(t['content'])}\n\n"
 
         # Make API request with retries and error handling
         content = make_gemini_request(client, prompt)
@@ -462,7 +457,6 @@ Here are the sources to base the article on:
                 content += f"\n\n{shortcode}\n\n----------------\n"
         
         # 2) Post-processing to remove "$" and replace with " ดอลลาร์"
-        #    A simple regex that targets something like $100,000 → 100,000 ดอลลาร์
         content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
         
         return content
@@ -540,29 +534,43 @@ def main():
     # Create a placeholder for messages in the main area
     messages_placeholder = st.empty()
 
-    # Sidebar for inputs and controls
+    # -------------------------------
+    # SIDEBAR: Re-ordered UI Elements
+    # -------------------------------
     with st.sidebar:
+        # Radio buttons at the top
         content_source = st.radio(
             "How would you like to generate your article?",
-            ["Search and Generate", "Generate from URLs"],
+            ["Generate from URLs", "Search and Generate"],
             key="content_source"
         )
         
-        # Common elements that always appear
+        # Content source–specific input boxes immediately below the radio buttons
+        if content_source == "Generate from URLs":
+            st.text_area(
+                "URLs to Extract",
+                height=100,
+                key="user_main_text",
+                help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed using Firecrawl or Gemini."
+            )
+        elif content_source == "Search and Generate":
+            st.text_input("Enter your search query:", value=st.session_state.query, key="query")
+            st.slider("Hours to look back:", 1, 168, 12, key="hours_back")
+        
+        # Common input fields
         st.text_area(
             "Keywords (one per line)",
             height=68,
             key="keywords",
             help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
         )
-        
         news_angle = st.text_input(
             "News Angle",
             value="",
+            key="news_angle",
             help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective.
             Tips: You can use one of the English headlines from your selected news sources as your news angle."""
         )
-
         section_count = st.slider("Number of sections:", 2, 8, 3, key="section_count")
         
         # Promotional content selection
@@ -573,50 +581,51 @@ def main():
             if st.checkbox(name, key=f"promo_{name}"):
                 selected_promotions.append(promotional_content[name])
         promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
-        
-        # Source-specific inputs
-        if content_source == "Search and Generate":
-            query = st.text_input("Enter your search query:", value=st.session_state.query)
-            hours_back = st.slider("Hours to look back:", 1, 168, 12)
-            
-            if st.button("Search Content", type="primary"):
-                st.session_state.process_urls = False
-                results = perform_web_research(
-                    exa_client=exa_client,
-                    query=query,
-                    hours_back=hours_back
-                )
-                if results:
-                    st.session_state.search_results = serialize_search_results(results)
-                    st.session_state.search_results_json = json.dumps(
-                        st.session_state.search_results, 
-                        ensure_ascii=False, 
-                        indent=4
-                    )
-                else:
-                    with messages_placeholder:
-                        st.error("No results found. Try adjusting your search parameters.")
 
-        else:  # Generate from URLs
-            user_main_text = st.text_area(
-                "URLs to Extract",
-                height=100,
-                help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed to extract its content using Firecrawl or Gemini."
+        # Action button positioned at the bottom of the sidebar
+        if content_source == "Generate from URLs":
+            action_clicked = st.button("Generate Article from URLs", type="primary")
+        elif content_source == "Search and Generate":
+            action_clicked = st.button("Search Content", type="primary")
+
+    # --------------------------------
+    # MAIN AREA: Process Action Buttons
+    # --------------------------------
+    if action_clicked:
+        if content_source == "Generate from URLs":
+            user_main_text = st.session_state.get("user_main_text", "")
+            if not user_main_text.strip():
+                with messages_placeholder:
+                    st.error("Please enter at least one URL in the URLs to Extract box")
+            else:
+                st.session_state.generating = True
+                st.session_state.selected_indices = []  # Clear any previous selections
+                st.session_state.process_urls = True
+                st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
+        elif content_source == "Search and Generate":
+            query = st.session_state.get("query", st.session_state.query)
+            hours_back = st.session_state.get("hours_back", 12)
+            st.session_state.process_urls = False
+            results = perform_web_research(
+                exa_client=exa_client,
+                query=query,
+                hours_back=hours_back
             )
-            
-            if st.button("Generate Article from URLs", type="primary"):
-                if not user_main_text.strip():
-                    with messages_placeholder:
-                        st.error("Please enter at least one URL in the URLs to Extract box")
-                else:
-                    st.session_state.generating = True
-                    st.session_state.selected_indices = []  # Clear any previous selections
-                    st.session_state.process_urls = True
-                    st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
-                    
-    # Main area for displaying status and content
-    
-    # Show search results first if available
+            if results:
+                st.session_state.search_results = serialize_search_results(results)
+                st.session_state.search_results_json = json.dumps(
+                    st.session_state.search_results, 
+                    ensure_ascii=False, 
+                    indent=4
+                )
+            else:
+                with messages_placeholder:
+                    st.error("No results found. Try adjusting your search parameters.")
+
+    # --------------------------------
+    # MAIN AREA: Display Search Results and Process URLs
+    # --------------------------------
+    # Show search results if available (from "Search and Generate")
     if st.session_state.search_results:
         results = st.session_state.search_results
         st.subheader("Search Results")
@@ -672,10 +681,10 @@ def main():
                         "content": result['text']
                     })
                 
-                # Add additional content if provided
+                # Add additional content if provided (only applicable if "Generate from URLs" was used)
                 if content_source == "Generate from URLs":
                     additional_content = []
-                    for line in user_main_text.strip().split('\n'):
+                    for line in st.session_state.get("user_main_text", "").strip().split('\n'):
                         line = line.strip()
                         if line.startswith('http://') or line.startswith('https://'):
                             st.session_state.status_message = f"Extracting content from {line}..."
@@ -713,8 +722,8 @@ def main():
                             client=gemini_client,
                             transcripts=prepared_content,
                             keywords=keywords,
-                            news_angle=news_angle if news_angle.strip() else None,
-                            section_count=section_count,
+                            news_angle=st.session_state.news_angle if st.session_state.news_angle.strip() else None,
+                            section_count=st.session_state.section_count,
                             promotional_text=promo_text
                         )
                         if article:
@@ -732,9 +741,8 @@ def main():
                         st.error("No content available to generate article from")
                     st.session_state.generating = False
 
-    # Process URLs section
+    # Process URLs section (for "Generate from URLs" option)
     if st.session_state.process_urls and st.session_state.urls_to_process:
-        # Process URLs
         additional_content = []
         for line in st.session_state.urls_to_process:
             try:
@@ -762,16 +770,14 @@ def main():
             try:
                 with messages_placeholder:
                     st.info("Generating article...")
-                # Get keywords as a list directly from the text area
                 keywords = [k.strip() for k in st.session_state.keywords.split('\n') if k.strip()]
-                # Ensure promotional text is properly handled
                 promo_text = promotional_text.strip() if promotional_text else None
                 article = generate_article(
                     client=gemini_client,
                     transcripts=prepared_content,
                     keywords=keywords,
-                    news_angle=news_angle if news_angle.strip() else None,
-                    section_count=section_count,
+                    news_angle=st.session_state.news_angle if st.session_state.news_angle.strip() else None,
+                    section_count=st.session_state.section_count,
                     promotional_text=promo_text
                 )
                 if article:
@@ -795,7 +801,7 @@ def main():
 
     # Show generated article at the bottom
     if st.session_state.article:
-        st.markdown("---")  # Add a visual separator
+        st.markdown("---")  # Visual separator
         st.subheader("Generated Article")
         cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
         cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
