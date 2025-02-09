@@ -193,11 +193,11 @@ Follow these guidelines:
 - Create exactly {section_count} distinct H2 sections; for each section provide 3-4 paragraphs of in-depth explanation.
 - At the end, include an Excerpt for WordPress (1 sentence in Thai) and an Image Prompt.
 - The Image Prompt must be in English. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
-
+- SEO Title, Meta Description, H1 must be engaging and click-worthy (use news-like sentences). The length for each element should adhere to SEO best practices.
   
 Now, generate the article with the following structure:
-1. Title (include the primary keyword once)
-2. Main Content with {section_count} H2 sections
+1. Title, Meta Description and H1 (include the primary keyword once for each element). 
+2. Main Content with {section_count} H2 sections. 
 3. Excerpt for WordPress
 4. Image Prompt (in English only)
 
