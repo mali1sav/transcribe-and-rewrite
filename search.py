@@ -297,18 +297,14 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         # Note: We add an extra instruction to use the primary keyword exactly as provided.
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), follow these guidelines:
-1. Use power words that often appear in Thai crypto news headlines.
-2. Include specific numbers/stats when relevant.
-3. Create curiosity gaps.
-4. Make bold, specific statements.
-The above guidelines are examples. You must choose your own words or modify them as needed.
+When creating news-like and engaging section headings (H2) and subheadings (H3).
+Ensure to render Markdown properly as this will be displayed on Streamlit UI. Avoid raw markdown.
 
 Primary Keyword: {primary_keyword_display or ""}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
-**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the article text.
+**Important: Use the primary keyword exactly as provided (e.g., "Dogecoin") without altering its capitalization (e.g., do not convert it to all uppercase or lowercase) in the article text.
 
 # Content Focus Instructions:
 * Write the article from the perspective of the specified News Angle.
