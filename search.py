@@ -327,7 +327,7 @@ Do not number each heading.
 * **IMPORTANT:** Write all monetary values in USD without the '$' sign. After each numeric value (which may include commas or multipliers like K/M), append a space followed by "ดอลลาร์". For example, "$96,000K" should be written as "96,000K ดอลลาร์".
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally in the sentence like this [source name](url). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally in the introduction sentence a contextual manner using markdown hyperlinks [source name](url). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
 
 # Main Content Guidelines:
 * [Additional instructions...]
@@ -433,7 +433,7 @@ def extract_image_prompt(article_text):
     match = re.search(pattern, article_text, re.MULTILINE | re.DOTALL)
     if match:
         return match.group(1).strip()
-    return "Create a photorealistic scene that fits the main news article."
+    return "Create a photorealistic scene that fits the main news article in English. Keep it simple and focus on 1 or 2 objects."
 
 def extract_alt_text(article_text):
     pattern = r"(?i)Image ALT Text.*?\n(.*?)(?:\n\n|\Z)"
