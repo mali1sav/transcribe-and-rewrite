@@ -40,13 +40,9 @@ def init_gemini_client():
         if not api_key:
             st.error("Gemini API key not found. Please set GEMINI_API_KEY in your environment variables.")
             return None
-        
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        return {
-            'model': model,
-            'name': 'gemini-2.0-flash-exp'
-        }
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        return {'model': model, 'name': 'gemini-2.0-flash'}
     except Exception as e:
         st.error(f"Failed to initialize Gemini client: {str(e)}")
         return None
@@ -60,20 +56,17 @@ def init_gemini_client():
 def make_gemini_request(client, prompt):
     """Make Gemini API request with retries and proper error handling"""
     try:
-        # Add retry logic for Gemini API
         for attempt in range(3):
             try:
                 response = client['model'].generate_content(prompt)
                 if response and response.text:
                     return response.text
             except Exception as e:
-                if attempt == 2:  # Last attempt
+                if attempt == 2:
                     raise
                 st.warning(f"Retrying Gemini request (attempt {attempt + 2}/3)...")
-                time.sleep(2 ** attempt)  # Exponential backoff
-                
+                time.sleep(2 ** attempt)
         raise Exception("Failed to get valid response from Gemini API after all retries")
-            
     except Exception as e:
         st.error(f"Error making Gemini request: {str(e)}")
         raise
@@ -91,24 +84,18 @@ def extract_with_firecrawl(url):
         if not api_key:
             st.error("Firecrawl API key not found. Please set FIRECRAWL_API_KEY in your environment")
             return None
-            
         app = FirecrawlApp(api_key=api_key)
-        
-        # Define extraction schema
         class NestedModel1(BaseModel):
             title: str
             author: str = None
             published_date: str = None
             content: str
-
         class ExtractSchema(BaseModel):
             article: NestedModel1
-            
         data = app.extract([url], {
             'prompt': 'Extract the article title, author, published date, and content. Ensure the title and content are always included.',
             'schema': ExtractSchema.model_json_schema(),
         })
-        
         if data and data.get('success') and data.get('data'):
             article = data['data'].get('article')
             if article:
@@ -118,10 +105,8 @@ def extract_with_firecrawl(url):
                     'published_date': article.get('published_date'),
                     'text': article.get('content')
                 }
-        
         st.warning("Firecrawl could not extract content")
         return None
-            
     except Exception as e:
         st.error(f"Firecrawl extraction failed: {str(e)}")
         return None
@@ -129,7 +114,6 @@ def extract_with_firecrawl(url):
 def extract_url_content(gemini_client, url, messages_placeholder):
     """Extract article content using Firecrawl first, then fallback to Gemini if needed."""
     try:
-        # First try with Firecrawl
         with messages_placeholder:
             st.info(f"Attempting to extract content from {url} using Firecrawl...")
         fc_content = extract_with_firecrawl(url)
@@ -142,16 +126,12 @@ def extract_url_content(gemini_client, url, messages_placeholder):
                 'source': url,
                 'author': fc_content.get('author')
             }
-        
-        # If Firecrawl fails, try Gemini
         with messages_placeholder:
             st.info(f"Firecrawl failed, trying Gemini for {url}...")
         prompt = f"""Extract the main article content from this URL: {url}
 Return ONLY the article text content, no additional formatting or commentary.
 If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
-        
         response = make_gemini_request(gemini_client, prompt)
-        
         if response and 'EXTRACTION_FAILED' not in response:
             return {
                 'title': 'Extracted Content',
@@ -161,7 +141,6 @@ If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
                 'source': url,
                 'author': None
             }
-        
         return None
     except Exception as e:
         print(f"Error extracting content from {url}: {str(e)}")
@@ -171,10 +150,8 @@ def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
     try:
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(hours=hours_back)
-        
         start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
         end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%SZ')
-        
         response = exa_client.search_and_contents(
             query=query,
             num_results=num_results,
@@ -184,26 +161,18 @@ def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
             category='news',
             text=True
         )
-        
         if not response:
             return []
-            
         results = getattr(response, 'results', None) or response
         all_results = []
-        
         excluded_domains = ['twitter.com', 'youtube.com', 'youtu.be']
-        
         for result in results:
-            # Get URL and check against excluded domains
             url = str(getattr(result, 'url', '') or '')
             domain = get_domain(url)
             if any(excluded in domain for excluded in excluded_domains):
                 continue
-                
             title = str(getattr(result, 'title', 'No Title') or 'No Title')
             text = str(getattr(result, 'text', '') or '')
-            
-            # Parse date if available
             published_date = None
             if hasattr(result, 'published_date') and result.published_date:
                 try:
@@ -213,7 +182,6 @@ def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
                     published_date = parsed.isoformat()
                 except:
                     pass
-            
             transformed_result = {
                 'title': title,
                 'url': url,
@@ -222,12 +190,9 @@ def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
                 'source': domain
             }
             all_results.append(transformed_result)
-            
         if all_results:
             st.success(f"✅ Found {len(all_results)} results from Exa")
-            
         return all_results
-        
     except Exception as e:
         st.error(f"Error during Exa search: {str(e)}")
         return []
@@ -238,17 +203,10 @@ def perform_web_research(exa_client, query, hours_back, search_engines=None):
     Currently using Exa for comprehensive search results.
     """
     results = []
-    
     try:
-        # Get results from Exa
-        exa_results = perform_exa_search(
-            exa_client=exa_client,
-            query=query,
-            hours_back=hours_back
-        )
+        exa_results = perform_exa_search(exa_client, query, hours_back=hours_back)
         if exa_results:
             results.extend(exa_results)
-            
         return results
     except Exception as e:
         st.error(f"Error during web research: {str(e)}")
@@ -278,13 +236,11 @@ def prepare_content_for_article(selected_results):
         for result in selected_results:
             url = result.get('url', '').strip()
             source = result.get('source', '').strip()
-            # Handle both 'text' and 'content' fields for compatibility
             content = result.get('content', result.get('text', '')).strip()
-            
             content_item = {
                 'url': url,
                 'source': source,
-                'content': content  # Changed from 'text' to match generate_article's expected format
+                'content': content
             }
             prepared_content.append(content_item)
         return prepared_content
@@ -294,13 +250,26 @@ def prepare_content_for_article(selected_results):
 
 def escape_special_chars(text):
     """Escape special characters that might interfere with Markdown formatting."""
-    # Escape dollar signs that aren't already part of a LaTeX equation
     text = re.sub(r'(?<!\$)\$(?!\$)', r'\$', text)
-    # Escape other special Markdown characters
     chars_to_escape = ['*', '_', '`', '#', '~', '|', '<', '>', '[', ']']
     for char in chars_to_escape:
         text = text.replace(char, '\\' + char)
     return text
+
+def deduplicate_prompt(prompt):
+    """
+    Remove duplicate non-empty lines from the prompt while preserving the original order.
+    """
+    seen = set()
+    deduped_lines = []
+    for line in prompt.splitlines():
+        stripped = line.strip()
+        if stripped and stripped not in seen:
+            seen.add(stripped)
+            deduped_lines.append(line)
+        elif not stripped:
+            deduped_lines.append(line)
+    return "\n".join(deduped_lines)
 
 def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
     try:
@@ -309,10 +278,11 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
 
         # Process keywords without altering their original case for display
         keyword_list = [k.strip() for k in keywords if k.strip()] if keywords else []
+        # Use the keyword exactly as provided for display (e.g., "Dogecoin")
         primary_keyword_display = keyword_list[0] if keyword_list else ""
         secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
 
-        # For shortcode mapping, use uppercase to match the keys
+        # For shortcode mapping we still need uppercase keys, but we don't output them in the article
         primary_keyword_for_shortcode = primary_keyword_display.upper()
 
         shortcode_map = {
@@ -323,36 +293,41 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
             "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
         }
         
-        # Build the prompt header with instructions
+        # Build the prompt header with instructions.
+        # Note: We add an extra instruction to use the primary keyword exactly as provided.
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), use one of the relevant guidelines below:
+When creating section headings (H2) and subheadings (H3), follow these guidelines:
 1. Use power words that often appear in Thai crypto news headlines.
 2. Include specific numbers/stats when relevant.
 3. Create curiosity gaps.
 4. Make bold, specific statements.
-The above guidelines are just examples. You must choose your own words or modify them to fit the context of the article.
+The above guidelines are examples. You must choose your own words or modify them as needed.
 
 Primary Keyword: {primary_keyword_display or ""}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
+**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the article text.
+
 # Content Focus Instructions:
-* The article MUST be written from the perspective of the specified News Angle.
-* Only include information from sources that is relevant and supports this news angle.
-* Analyze each source and extract only the content that aligns with or provides context for the news angle.
-* If a source contains information not relevant to the news angle, exclude it.
-* Ensure each section contributes to developing the specified news angle.
-* Maintain focus throughout the article—avoid tangents or unrelated information.
+* Write the article from the perspective of the specified News Angle.
+* Include only information that supports this news angle.
+* Analyze each source and use only the content that provides context for the news angle.
+* Exclude information not relevant to the news angle.
+* Ensure each section develops the news angle thoroughly.
+* Avoid tangents or unrelated information.
 
 # Section Instructions:
-Create exactly {section_count} heading level 2 sections in Thai for the main content. Ensure each section is thorough and aligns with the news angle.
+Create exactly {section_count} heading level 2 sections in Thai for the main content.
+For each section, do not merely summarize—provide a detailed discussion that thoroughly explores the topic. The discussion should be as detailed and lengthy as the original source text, matching its depth and nuance. Use as many tokens as needed.
+Do not number each heading.
 
 # Currency Formatting Instruction:
 * **IMPORTANT:** Write all monetary values in USD without the '$' sign. After each numeric value (which may include commas or multipliers like K/M), append a space followed by "ดอลลาร์". For example, "$96,000K" should be written as "96,000K ดอลลาร์".
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article, embedded in the intro in a natural, contextual manner using markdown hyperlinks (e.g., (อ้างอิง ([source name](url)))).
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally (e.g., (อ้างอิง ([source name](url)))). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
 
 # Main Content Guidelines:
 * [Additional instructions...]
@@ -362,26 +337,20 @@ Create exactly {section_count} heading level 2 sections in Thai for the main con
 **Promotional Integration Guidelines**
 ----------------------------------------
 {promotional_text}
-
 * Requirements:
-  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai.
+  1. Create a seamless Heading Level 2 aligned with the {news_angle} in Thai.
   2. The content must be in Thai.
-  3. Transit seamlessly from the main content into the promotional text.
-  4. Find a way to mention {primary_keyword_display} in a seamless way.
+  3. Transit smoothly from the main content into the promotional text.
+  4. Mention {primary_keyword_display} seamlessly.
   5. Limit promotional text to 120 words, placed at the end of the article.
 ''' if promotional_text else ''}
 
 # Article Structure:
-
-[Create an engaging news-style title that includes {primary_keyword_display} once, maintaining its original form]
-
-[First paragraph must include {primary_keyword_display} once in its original form]
-
-[Create H2 sections below, with at least 2 containing {primary_keyword_display}. Each H2 should align with the news angle.]
-
-[Write supporting paragraphs using {primary_keyword_display} and {secondary_keywords} where they fit naturally.]
-
-[Conclude with a summary emphasizing the news angle's significance including {primary_keyword_display} if it fits naturally.]
+[Create an engaging news-style title that includes {primary_keyword_display} once, exactly as provided]
+[The first paragraph must include {primary_keyword_display} exactly as provided]
+[Create H2 sections below, with at least 2 sections containing {primary_keyword_display} exactly as provided, aligned with the news angle]
+[Write supporting paragraphs using {primary_keyword_display} and {secondary_keywords} where they fit naturally]
+[Conclude with a summary emphasizing the news angle's significance, including {primary_keyword_display} if it fits naturally]
 
 ## SEO Elements
 [SEO Instructions...]
@@ -392,34 +361,36 @@ Slug URL in English (must include {primary_keyword_display}; translate Thai keyw
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
 ## Image Prompt
-[Create a photorealistic scene that fits the main news article.]
+[Create a photorealistic scene that fits the main news article in English. Keep it simple and focus on 1 or 2 objects.]
 
 # Source Usage Instructions:
-* Use provided sources as primary reference for facts and data.
-* Your knowledge can supplement for context, but never override source information.
+* Use provided sources as the primary reference for facts and data.
+* Supplement with your knowledge only if it does not override source information.
 * When source information exists on a topic, it takes precedence over general knowledge.
 
 Here are the sources to base the article on:
 """
-        # Append each source content only once (to avoid repeated citations)
+        # --- Consolidate sources to avoid repeated citations ---
         seen_sources = {}
         for t in transcripts:
             source = t['source']
             if source not in seen_sources:
                 seen_sources[source] = t
-        
         for source, t in seen_sources.items():
-            prompt += f"### Content from {source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
-        
-        # Make API request with retries and error handling
+            # Ensure the source is formatted with the first letter in uppercase.
+            formatted_source = source[0].upper() + source[1:] if source else source
+            prompt += f"### Content from {formatted_source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
+        # --- End of citation consolidation ---
+
+        # Deduplicate repeated lines in the prompt to save tokens.
+        prompt = deduplicate_prompt(prompt)
+
         content = make_gemini_request(client, prompt)
         if not content:
             return None
-            
-        # Use the uppercase version for matching the shortcode_map key
+
+        # Use the uppercase version for matching the shortcode_map key (for shortcode lookup only).
         shortcode = shortcode_map.get(primary_keyword_for_shortcode, "")
-        
-        # Insert the shortcode if available into the final text
         if shortcode:
             excerpt_split = "Excerpt for WordPress:"
             if excerpt_split in content:
@@ -431,9 +402,6 @@ Here are the sources to base the article on:
                 )
             else:
                 content += f"\n\n{shortcode}\n\n----------------\n"
-        
-        # We now rely on the LLM (via prompt instructions) to handle currency formatting.
-        
         return content
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
@@ -443,7 +411,6 @@ def load_promotional_content():
     """Load promotional content from files in the pr directory."""
     pr_dir = os.path.join(os.path.dirname(__file__), 'pr')
     content_map = {}
-    
     if os.path.exists(pr_dir):
         for filename in os.listdir(pr_dir):
             if filename.endswith('.txt'):
@@ -451,20 +418,22 @@ def load_promotional_content():
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read().strip()
-                        # Use filename without extension as key
                         name = os.path.splitext(filename)[0]
                         content_map[name] = content
                 except Exception as e:
                     print(f"Error loading {filename}: {str(e)}")
-    
     return content_map
 
 def extract_image_prompt(article_text):
-    pattern = r"(?i)Image Prompt.*?\n(.*)"
-    match = re.search(pattern, article_text, re.DOTALL)
+    """
+    Extract the image prompt by looking for a section starting with "## Image Prompt" on its own line.
+    If not found, return a default prompt.
+    """
+    pattern = r"(?is)^##\s*Image Prompt\s*\n(.*?)\n(?=##|\Z)"
+    match = re.search(pattern, article_text, re.MULTILINE | re.DOTALL)
     if match:
         return match.group(1).strip()
-    return None
+    return "Create a photorealistic scene that fits the main news article."
 
 def extract_alt_text(article_text):
     pattern = r"(?i)Image ALT Text.*?\n(.*?)(?:\n\n|\Z)"
@@ -476,7 +445,6 @@ def extract_alt_text(article_text):
 def main():
     st.set_page_config(page_title="Search and Generate Articles", layout="wide")
     
-    # Initialize session state
     if 'keywords' not in st.session_state:
         st.session_state.keywords = "Bitcoin"
     if 'query' not in st.session_state:
@@ -506,21 +474,15 @@ def main():
         st.error(f"❌ Failed to initialize clients: {str(e)}")
         return
 
-    # Create a placeholder for messages in the main area
     messages_placeholder = st.empty()
 
-    # -------------------------------
-    # SIDEBAR: Re-ordered UI Elements
-    # -------------------------------
     with st.sidebar:
-        # Radio buttons at the top
         content_source = st.radio(
             "How would you like to generate your article?",
             ["Generate from URLs", "Search and Generate"],
-            key="content_source"
+            key="content_source",
+            index=0
         )
-        
-        # Content source–specific input boxes immediately below the radio buttons
         if content_source == "Generate from URLs":
             st.text_area(
                 "URLs to Extract",
@@ -531,8 +493,6 @@ def main():
         elif content_source == "Search and Generate":
             st.text_input("Enter your search query:", value=st.session_state.query, key="query")
             st.slider("Hours to look back:", 1, 168, 12, key="hours_back")
-        
-        # Common input fields
         st.text_area(
             "Keywords (one per line)",
             height=68,
@@ -547,8 +507,6 @@ def main():
             Tips: You can use one of the English headlines from your selected news sources as your news angle."""
         )
         section_count = st.slider("Number of sections:", 3, 8, 4, key="section_count")
-        
-        # Promotional content selection
         promotional_content = load_promotional_content()
         st.write("Promotional Content")
         selected_promotions = []
@@ -556,16 +514,11 @@ def main():
             if st.checkbox(name, key=f"promo_{name}"):
                 selected_promotions.append(promotional_content[name])
         promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
-
-        # Action button positioned at the bottom of the sidebar
         if content_source == "Generate from URLs":
             action_clicked = st.button("Generate Article from URLs", type="primary")
         elif content_source == "Search and Generate":
             action_clicked = st.button("Search Content", type="primary")
 
-    # --------------------------------
-    # MAIN AREA: Process Action Buttons
-    # --------------------------------
     if action_clicked:
         if content_source == "Generate from URLs":
             user_main_text = st.session_state.get("user_main_text", "")
@@ -574,18 +527,14 @@ def main():
                     st.error("Please enter at least one URL in the URLs to Extract box")
             else:
                 st.session_state.generating = True
-                st.session_state.selected_indices = []  # Clear any previous selections
+                st.session_state.selected_indices = []
                 st.session_state.process_urls = True
                 st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
         elif content_source == "Search and Generate":
             query = st.session_state.get("query", st.session_state.query)
             hours_back = st.session_state.get("hours_back", 12)
             st.session_state.process_urls = False
-            results = perform_web_research(
-                exa_client=exa_client,
-                query=query,
-                hours_back=hours_back
-            )
+            results = perform_web_research(exa_client, query, hours_back)
             if results:
                 st.session_state.search_results = serialize_search_results(results)
                 st.session_state.search_results_json = json.dumps(
@@ -597,14 +546,9 @@ def main():
                 with messages_placeholder:
                     st.error("No results found. Try adjusting your search parameters.")
 
-    # --------------------------------
-    # MAIN AREA: Display Search Results and Process URLs
-    # --------------------------------
-    # Show search results if available (from "Search and Generate")
     if st.session_state.search_results:
         results = st.session_state.search_results
         st.subheader("Search Results")
-            
         for idx, result in enumerate(results['results']):
             with st.container():
                 cols = st.columns([0.05, 0.95])
@@ -616,37 +560,30 @@ def main():
                     else:
                         if idx in st.session_state.selected_indices:
                             st.session_state.selected_indices.remove(idx)
-                
                 with cols[1]:
                     title = result['title']
                     source = result['source']
                     url = result['url']
                     published_date = result['published_date'] or "Unknown time"
-                        
                     def format_local_date(iso_date):
                         if not iso_date:
                             return "Unknown time"
                         try:
                             utc_time = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
-                            local_tz = pytz.timezone('Asia/Bangkok')  # Default to Bangkok time
+                            local_tz = pytz.timezone('Asia/Bangkok')
                             local_time = utc_time.astimezone(local_tz)
                             return local_time.strftime('%Y-%m-%d %H:%M:%S')
                         except:
                             return "Unknown time"
-                        
                     formatted_date = format_local_date(published_date)
                     st.markdown(f'<div class="search-result"><a href="{url}" target="_blank">{title}</a><br><span class="search-result-source">Source: {source} | Published: {formatted_date}</span></div>', unsafe_allow_html=True)
-                        
                     preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
                     st.markdown(preview)
                     with st.expander("Show full content"):
                         st.write(result['text'])
-        
         if st.session_state.selected_indices:
             if st.button("Generate Article from all sources", type="primary"):
                 st.session_state.generating = True
-                
-                # Prepare content from selected search results
                 prepared_content = []
                 for idx in st.session_state.selected_indices:
                     result = results['results'][idx]
@@ -655,8 +592,6 @@ def main():
                         "source": result['source'],
                         "content": result['text']
                     })
-                
-                # Add additional content if provided (only applicable if "Generate from URLs" was used)
                 if content_source == "Generate from URLs":
                     additional_content = []
                     for line in st.session_state.get("user_main_text", "").strip().split('\n'):
@@ -666,7 +601,7 @@ def main():
                             extracted = extract_url_content(gemini_client, line, messages_placeholder)
                             if extracted:
                                 additional_content.append(extracted)
-                        elif line:  # If it's not a URL but has content
+                        elif line:
                             additional_content.append({
                                 'title': 'User Provided Content',
                                 'url': '',
@@ -675,24 +610,18 @@ def main():
                                 'source': 'User Input',
                                 'author': None
                             })
-                    
                     for item in additional_content:
                         prepared_content.append({
                             "url": item.get('url', ''),
                             "source": item.get('source', 'User Input'),
                             "content": item.get('text', '')
                         })
-                
                 if prepared_content:
                     try:
                         with messages_placeholder:
                             st.info("Generating article...")
-                        # Convert keywords string to list if it exists
                         keywords = st.session_state.keywords.split('\n') if st.session_state.keywords else []
-                        
-                        # Always include promotional text if provided
                         promo_text = promotional_text.strip() if promotional_text else None
-                        
                         article = generate_article(
                             client=gemini_client,
                             transcripts=prepared_content,
@@ -716,7 +645,6 @@ def main():
                         st.error("No content available to generate article from")
                     st.session_state.generating = False
 
-    # Process URLs section (for "Generate from URLs" option)
     if st.session_state.process_urls and st.session_state.urls_to_process:
         additional_content = []
         for line in st.session_state.urls_to_process:
@@ -732,7 +660,6 @@ def main():
             except Exception as e:
                 with messages_placeholder:
                     st.error(f"Error extracting content from {line}: {str(e)}")
-
         if additional_content:
             prepared_content = []
             for item in additional_content:
@@ -741,7 +668,6 @@ def main():
                     "source": item.get('source', 'User Input'),
                     "content": item.get('text', '')
                 })
-                
             try:
                 with messages_placeholder:
                     st.info("Generating article...")
@@ -768,21 +694,17 @@ def main():
         else:
             with messages_placeholder:
                 st.error("No content could be extracted from the provided URLs")
-        
-        # Reset URL processing flags
         st.session_state.process_urls = False
         st.session_state.urls_to_process = None
         st.session_state.generating = False
 
-    # Show generated article at the bottom
     if st.session_state.article:
-        st.markdown("---")  # Visual separator
+        st.markdown("---")
         st.subheader("Generated Article")
         cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
         cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
         cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)
         st.markdown(cleaned_article)
-            
         st.download_button(
             label="Download Article",
             data=st.session_state.article,
@@ -790,63 +712,56 @@ def main():
             mime="text/markdown",
             use_container_width=True
         )
-
         # -------------------------------
         # Image Generation and Optional Editing Workflow
         # -------------------------------
         image_prompt = extract_image_prompt(st.session_state.article)
         alt_text = extract_alt_text(st.session_state.article)
-            
-        if image_prompt:
-            st.session_state.status_message = "Generating image from Together AI..."
-            together_client = Together()
-            try:
-                response = together_client.images.generate(
-                    prompt=image_prompt,
-                    model="black-forest-labs/FLUX.1-schnell-free",
-                    width=1200,
-                    height=800,
-                    steps=4,
-                    n=1,
-                    response_format="b64_json"
-                )
-                    
-                if response and response.data and len(response.data) > 0:
-                    b64_data = response.data[0].b64_json
-                    st.image(
-                        "data:image/png;base64," + b64_data,
-                        caption=alt_text or "Generated image"
+        # If no image prompt was found, use a default prompt
+        if not image_prompt:
+            image_prompt = "Create a photorealistic scene that fits the main news article."
+        st.write("Image Prompt:", image_prompt)  # Debug: Show current prompt
+        together_client = Together()
+        try:
+            response = together_client.images.generate(
+                prompt=image_prompt,
+                model="black-forest-labs/FLUX.1-schnell-free",
+                width=1200,
+                height=800,
+                steps=4,
+                n=1,
+                response_format="b64_json"
+            )
+            if response and response.data and len(response.data) > 0:
+                b64_data = response.data[0].b64_json
+                st.image("data:image/png;base64," + b64_data, caption=alt_text or "Generated image")
+            else:
+                st.session_state.error_message = "Failed to generate image from Together AI."
+        except Exception as e:
+            st.session_state.error_message = f"Error generating image: {str(e)}"
+        
+        # Optional image editing workflow: always allow editing
+        if st.checkbox("Edit image prompt", key="edit_image_checkbox"):
+            edited_image_prompt = st.text_area("Edit Image Prompt", value=image_prompt, key="edited_image_prompt")
+            if st.button("Submit Edited Image Prompt", key="submit_edited_image"):
+                st.session_state.status_message = "Generating edited image from Together AI..."
+                try:
+                    edited_response = together_client.images.generate(
+                        prompt=edited_image_prompt,
+                        model="black-forest-labs/FLUX.1-schnell-free",
+                        width=1200,
+                        height=800,
+                        steps=4,
+                        n=1,
+                        response_format="b64_json"
                     )
-                else:
-                    st.session_state.error_message = "Failed to generate image from Together AI."
-            except Exception as e:
-                st.session_state.error_message = f"Error generating image: {str(e)}"
-            
-            # Optional: Allow the human editor to edit the image prompt and re-submit
-            if st.checkbox("Edit image prompt", key="edit_image_checkbox"):
-                edited_image_prompt = st.text_area("Edit Image Prompt", value=image_prompt, key="edited_image_prompt")
-                if st.button("Submit Edited Image Prompt", key="submit_edited_image"):
-                    st.session_state.status_message = "Generating edited image from Together AI..."
-                    try:
-                        edited_response = together_client.images.generate(
-                            prompt=edited_image_prompt,
-                            model="black-forest-labs/FLUX.1-schnell-free",
-                            width=1200,
-                            height=800,
-                            steps=4,
-                            n=1,
-                            response_format="b64_json"
-                        )
-                        if edited_response and edited_response.data and len(edited_response.data) > 0:
-                            b64_data = edited_response.data[0].b64_json
-                            st.image(
-                                "data:image/png;base64," + b64_data,
-                                caption=alt_text or "Edited generated image"
-                            )
-                        else:
-                            st.error("Failed to generate image from Together AI using the edited prompt.")
-                    except Exception as e:
-                        st.error(f"Error generating image with edited prompt: {str(e)}")
+                    if edited_response and edited_response.data and len(edited_response.data) > 0:
+                        b64_data = edited_response.data[0].b64_json
+                        st.image("data:image/png;base64," + b64_data, caption=alt_text or "Edited generated image")
+                    else:
+                        st.error("Failed to generate image from Together AI using the edited prompt.")
+                except Exception as e:
+                    st.error(f"Error generating image with edited prompt: {str(e)}")
 
 def run_app():
     main()
