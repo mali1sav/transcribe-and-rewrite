@@ -327,7 +327,7 @@ Do not number each heading.
 * **IMPORTANT:** Write all monetary values in USD without the '$' sign. After each numeric value (which may include commas or multipliers like K/M), append a space followed by "ดอลลาร์". For example, "$96,000K" should be written as "96,000K ดอลลาร์".
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally (e.g., (อ้างอิง ([source name](url)))). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally in the sentence like this [source name](url). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
 
 # Main Content Guidelines:
 * [Additional instructions...]
