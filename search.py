@@ -297,14 +297,18 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         # Note: We add an extra instruction to use the primary keyword exactly as provided.
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating news-like and engaging section headings (H2) and subheadings (H3).
-Ensure to render Markdown properly as this will be displayed on Streamlit UI. Avoid raw markdown.
+When creating section headings (H2) and subheadings (H3), follow these guidelines:
+1. Use power words that often appear in Thai crypto news headlines.
+2. Include specific numbers/stats when relevant.
+3. Create curiosity gaps.
+4. Make bold, specific statements.
+The above guidelines are examples. You must choose your own words or modify them as needed.
 
 Primary Keyword: {primary_keyword_display or ""}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
-**Important: Use the primary keyword exactly as provided (e.g., "Dogecoin") without altering its capitalization (e.g., do not convert it to all uppercase or lowercase) in the article text.
+**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the article text.
 
 # Content Focus Instructions:
 * Write the article from the perspective of the specified News Angle.
@@ -323,7 +327,7 @@ Do not number each heading.
 * **IMPORTANT:** Write all monetary values in USD without the '$' sign. After each numeric value (which may include commas or multipliers like K/M), append a space followed by "ดอลลาร์". For example, "$96,000K" should be written as "96,000K ดอลลาร์".
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally in the introduction sentence a contextual manner using markdown hyperlinks [source name](url). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article. Embed each citation naturally (e.g., (อ้างอิง ([source name](url)))). Ensure that each source is cited only once—do not repeat the citation in multiple sections.
 
 # Main Content Guidelines:
 * [Additional instructions...]
@@ -429,7 +433,7 @@ def extract_image_prompt(article_text):
     match = re.search(pattern, article_text, re.MULTILINE | re.DOTALL)
     if match:
         return match.group(1).strip()
-    return "Create a photorealistic scene that fits the main news article in English. Keep it simple and focus on 1 or 2 objects."
+    return "Create a photorealistic scene that fits the main news article."
 
 def extract_alt_text(article_text):
     pattern = r"(?i)Image ALT Text.*?\n(.*?)(?:\n\n|\Z)"
