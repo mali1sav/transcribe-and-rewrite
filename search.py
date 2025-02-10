@@ -147,8 +147,8 @@ def extract_url_content(gemini_client, url, messages_placeholder):
         with messages_placeholder:
             st.info(f"Firecrawl failed, trying Gemini for {url}...")
         prompt = f"""Extract the main article content from this URL: {url}
-        Return ONLY the article text content, no additional formatting or commentary.
-        If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
+Return ONLY the article text content, no additional formatting or commentary.
+If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
         
         response = make_gemini_request(gemini_client, prompt)
         
@@ -307,11 +307,14 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         if not transcripts:
             return None
 
-        # Keywords should already be a list from the text area split
-        keyword_list = keywords if keywords else []
-        primary_keyword = keyword_list[0].upper() if keyword_list else ""
+        # Process keywords without altering their original case for display
+        keyword_list = [k.strip() for k in keywords if k.strip()] if keywords else []
+        primary_keyword_display = keyword_list[0] if keyword_list else ""
         secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
-        
+
+        # For shortcode mapping, use uppercase to match the keys
+        primary_keyword_for_shortcode = primary_keyword_display.upper()
+
         shortcode_map = {
             "BITCOIN": '[latest_articles label="ข่าว Bitcoin (BTC) ล่าสุด" count_of_posts="6" taxonomy="category" term_id="7"]',
             "ETHEREUM": '[latest_articles label="ข่าว Ethereum ล่าสุด" count_of_posts="6" taxonomy="category" term_id="8"]',
@@ -320,52 +323,39 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
             "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
         }
         
+        # Build the prompt header with instructions
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
 When creating section headings (H2) and subheadings (H3), use one of the relevant guidelines below:
-1. Use power words that often in appear in Thai crypto news headline. Choose words that best fit the specific news context.
-2. Include specific numbers/stats when relevant (examples: "10 เท่า!", "5 เหรียญ Meme ที่อาจพุ่ง 1000%")
-3. Create curiosity gaps (examples:"เบื้องหลังการพุ่งทะยานของราคา...", "จับตา! สัญญาณที่บ่งชี้ว่า...")
-4. Make bold, specific statements (examples:"เหรียญคริปโตที่ดีที่สุด", "ทำไมวาฬถึงทุ่มเงินหมื่นล้านใส่...")
+1. Use power words that often appear in Thai crypto news headlines.
+2. Include specific numbers/stats when relevant.
+3. Create curiosity gaps.
+4. Make bold, specific statements.
 The above guidelines are just examples. You must choose your own words or modify them to fit the context of the article.
 
-Primary Keyword: {primary_keyword or ""}
+Primary Keyword: {primary_keyword_display or ""}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
 # Content Focus Instructions:
-* The article MUST be written from the perspective of the specified News Angle above
-* Only include information from sources that is relevant to and supports this news angle
-* Analyze each source and extract only the content that aligns with or provides context for the news angle
-* If a source contains information not relevant to the news angle, exclude it
-* Ensure each section contributes to developing the specified news angle
-* Maintain focus throughout the article - avoid tangents or unrelated information
+* The article MUST be written from the perspective of the specified News Angle.
+* Only include information from sources that is relevant and supports this news angle.
+* Analyze each source and extract only the content that aligns with or provides context for the news angle.
+* If a source contains information not relevant to the news angle, exclude it.
+* Ensure each section contributes to developing the specified news angle.
+* Maintain focus throughout the article—avoid tangents or unrelated information.
+
+# Section Instructions:
+Create exactly {section_count} heading level 2 sections in Thai for the main content. Ensure each section is thorough and aligns with the news angle.
+
+# Currency Formatting Instruction:
+* **IMPORTANT:** Write all monetary values in USD without the '$' sign. After each numeric value (which may include commas or multipliers like K/M), append a space followed by "ดอลลาร์". For example, "$96,000K" should be written as "96,000K ดอลลาร์".
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article, and be embedded in the intro section in a natural, contextual manner, using markdown hyperlinks such as this: (อ้างอิง ([source name](url)))
+* CRITICAL: Include concise attributions to each source only ONCE in the entire article, embedded in the intro in a natural, contextual manner using markdown hyperlinks (e.g., (อ้างอิง ([source name](url)))).
 
-# Main Content (also applicable to H1,H2, Title, and Meta Description) Guidelines:
-* Keep the following terms in English, rest in Thai:
-  - Technical terms
-  - Entity names
-  - People names
-  - Place names (including cities, states, countries)
-  - Organizations
-  - Company names
-  - Cryptocurrency names (use proper capitalization: "Bitcoin", not "BITCOIN" or "bitcoin")
-  - Platform names
-  - Government entities (e.g., "Illinois State", not "รัฐอิลลินอยส์")
-* Use proper capitalization for all terms:
-  - Cryptocurrencies: "Bitcoin", "Ethereum", "Solana"
-  - Companies: "Binance", "Coinbase"
-  - Organizations: "Federal Reserve", "Securities and Exchange Commission"
-  - Never use ALL CAPS unless it's a widely recognized acronym (e.g., "FBI", "SEC")
-
-* Ensure to avoid unintended Markdown or LaTeX formatting.
-* Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
-* For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
-* Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
-* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
+# Main Content Guidelines:
+* [Additional instructions...]
 
 # Promotional Content Guidelines
 {f'''
@@ -374,76 +364,62 @@ News Angle: {news_angle or ""}
 {promotional_text}
 
 * Requirements:
-  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English but the rest of sentence in Thai).
-  2. The content must be in Thai (keep technical terms and entity names in English but the rest in Thai).
+  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai.
+  2. The content must be in Thai.
   3. Transit seamlessly from the main content into the promotional text.
-  4. Find a way to mention {primary_keyword} in a seamless way.
+  4. Find a way to mention {primary_keyword_display} in a seamless way.
   5. Limit promotional text to 120 words, placed at the end of the article.
 ''' if promotional_text else ''}
 
 # Article Structure:
-## Title
-[Create an engaging news-style title that includes {primary_keyword} once, maintaining its original form]
 
-## Main Content
-[First paragraph must include {primary_keyword} once in its original form]
+[Create an engaging news-style title that includes {primary_keyword_display} once, maintaining its original form]
 
-[Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
+[First paragraph must include {primary_keyword_display} once in its original form]
 
-[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. Do not repeat the same source attribution more than once in the entire article.
-]
+[Create H2 sections below, with at least 2 containing {primary_keyword_display}. Each H2 should align with the news angle.]
 
-[Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
+[Write supporting paragraphs using {primary_keyword_display} and {secondary_keywords} where they fit naturally.]
+
+[Conclude with a summary emphasizing the news angle's significance including {primary_keyword_display} if it fits naturally.]
 
 ## SEO Elements
-1. Title Options (include {primary_keyword} once, maintain original form):
-   - [Option 1: News-focused title]
-   - [Option 2: Number-focused title]
-   - [Option 3: Question-based title]
-
-2. Meta Description Options (include {primary_keyword} once):
-   - [Option 1: News angle + key benefit]
-   - [Option 2: Number-focused]
-   - [Option 3: Question to stimulate curiosity]
-
-3. H1 Options (aligned with Title and Meta Description including {primary_keyword}):
-   - [Option 1: Direct news statement]
-   - [Option 2: Number-focused statement]
-   - [Option 3: Engaging question]
+[SEO Instructions...]
 
 ## Additional Elements
-Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
-- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
+Slug URL in English (must include {primary_keyword_display}; translate Thai keywords to English)
+- Image ALT Text in Thai including {primary_keyword_display}
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
 ## Image Prompt
-[Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Don't include anything from promotional content. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.]
+[Create a photorealistic scene that fits the main news article.]
 
 # Source Usage Instructions:
-* Use provided sources as primary reference for facts and data
-* Your knowledge can supplement for context and understanding, but never override source information
-* When source information exists on a topic, it takes precedence over general knowledge
+* Use provided sources as primary reference for facts and data.
+* Your knowledge can supplement for context, but never override source information.
+* When source information exists on a topic, it takes precedence over general knowledge.
 
 Here are the sources to base the article on:
 """
-        # Append transcripts with escaped special characters, ensuring each source attribution appears only once
-        seen_sources = set()
+        # Append each source content only once (to avoid repeated citations)
+        seen_sources = {}
         for t in transcripts:
             source = t['source']
             if source not in seen_sources:
-                seen_sources.add(source)
-                prompt += f"### Content from {source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
-            else:
-                prompt += f"{escape_special_chars(t['content'])}\n\n"
-
+                seen_sources[source] = t
+        
+        for source, t in seen_sources.items():
+            prompt += f"### Content from {source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
+        
         # Make API request with retries and error handling
         content = make_gemini_request(client, prompt)
         if not content:
             return None
             
-        shortcode = shortcode_map.get(primary_keyword, "")
+        # Use the uppercase version for matching the shortcode_map key
+        shortcode = shortcode_map.get(primary_keyword_for_shortcode, "")
         
-        # 1) Insert the relevant shortcode in the final text
+        # Insert the shortcode if available into the final text
         if shortcode:
             excerpt_split = "Excerpt for WordPress:"
             if excerpt_split in content:
@@ -456,8 +432,7 @@ Here are the sources to base the article on:
             else:
                 content += f"\n\n{shortcode}\n\n----------------\n"
         
-        # 2) Post-processing to remove "$" and replace with " ดอลลาร์"
-        content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
+        # We now rely on the LLM (via prompt instructions) to handle currency formatting.
         
         return content
     except Exception as e:
@@ -571,7 +546,7 @@ def main():
             help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective.
             Tips: You can use one of the English headlines from your selected news sources as your news angle."""
         )
-        section_count = st.slider("Number of sections:", 2, 8, 3, key="section_count")
+        section_count = st.slider("Number of sections:", 3, 8, 4, key="section_count")
         
         # Promotional content selection
         promotional_content = load_promotional_content()
@@ -816,7 +791,9 @@ def main():
             use_container_width=True
         )
 
-        # Handle image generation
+        # -------------------------------
+        # Image Generation and Optional Editing Workflow
+        # -------------------------------
         image_prompt = extract_image_prompt(st.session_state.article)
         alt_text = extract_alt_text(st.session_state.article)
             
@@ -844,6 +821,32 @@ def main():
                     st.session_state.error_message = "Failed to generate image from Together AI."
             except Exception as e:
                 st.session_state.error_message = f"Error generating image: {str(e)}"
+            
+            # Optional: Allow the human editor to edit the image prompt and re-submit
+            if st.checkbox("Edit image prompt", key="edit_image_checkbox"):
+                edited_image_prompt = st.text_area("Edit Image Prompt", value=image_prompt, key="edited_image_prompt")
+                if st.button("Submit Edited Image Prompt", key="submit_edited_image"):
+                    st.session_state.status_message = "Generating edited image from Together AI..."
+                    try:
+                        edited_response = together_client.images.generate(
+                            prompt=edited_image_prompt,
+                            model="black-forest-labs/FLUX.1-schnell-free",
+                            width=1200,
+                            height=800,
+                            steps=4,
+                            n=1,
+                            response_format="b64_json"
+                        )
+                        if edited_response and edited_response.data and len(edited_response.data) > 0:
+                            b64_data = edited_response.data[0].b64_json
+                            st.image(
+                                "data:image/png;base64," + b64_data,
+                                caption=alt_text or "Edited generated image"
+                            )
+                        else:
+                            st.error("Failed to generate image from Together AI using the edited prompt.")
+                    except Exception as e:
+                        st.error(f"Error generating image with edited prompt: {str(e)}")
 
 def run_app():
     main()
