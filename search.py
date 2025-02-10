@@ -167,13 +167,32 @@ def extract_url_content(gemini_client, url, messages_placeholder):
         print(f"Error extracting content from {url}: {str(e)}")
         return None
 
-def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
+# ---------------------------------------------------------------------------
+# Helper function to sanitize text by removing control characters.
+# This will remove non-printable characters that make the text look corrupted.
+# ---------------------------------------------------------------------------
+def sanitize_text(text):
+    # Remove control characters (except newline and tab)
+    return ''.join(ch for ch in text if unicodedata.category(ch)[0] != "C" or ch in "\n\t ")
+
+# ---------------------------------------------------------------------------
+# MODIFIED: Use a full day filter instead of a relative 'hours_back' filter.
+# This now defaults to today's full day in UTC to match Exa's playground behavior.
+# ---------------------------------------------------------------------------
+def perform_exa_search(exa_client, query, num_results=10, specific_date=None):
     try:
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(hours=hours_back)
+        if specific_date:
+            # If a specific date is provided, use that day’s full range.
+            start_date = datetime(specific_date.year, specific_date.month, specific_date.day, 0, 0, 0, tzinfo=timezone.utc)
+            end_date = datetime(specific_date.year, specific_date.month, specific_date.day, 23, 59, 59, 999000, tzinfo=timezone.utc)
+        else:
+            # Default: use today's full day in UTC.
+            now = datetime.now(timezone.utc)
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = now.replace(hour=23, minute=59, second=59, microsecond=999000)
         
-        start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%SZ')
-        end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+        start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%S.999Z')
         
         response = exa_client.search_and_contents(
             query=query,
@@ -202,6 +221,9 @@ def perform_exa_search(exa_client, query, num_results=10, hours_back=12):
                 
             title = str(getattr(result, 'title', 'No Title') or 'No Title')
             text = str(getattr(result, 'text', '') or '')
+            
+            # Sanitize the text to remove corrupted/control characters.
+            text = sanitize_text(text)
             
             # Parse date if available
             published_date = None
@@ -244,7 +266,8 @@ def perform_web_research(exa_client, query, hours_back, search_engines=None):
         exa_results = perform_exa_search(
             exa_client=exa_client,
             query=query,
-            hours_back=hours_back
+            num_results=10  # Adjust num_results as needed
+            # Note: The hours_back parameter is no longer used here.
         )
         if exa_results:
             results.extend(exa_results)
@@ -322,12 +345,7 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         
         prompt = f"""
 Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), use one of the relevant guidelines below:
-1. Use power words that often in appear in Thai crypto news headline. Choose words that best fit the specific news context.
-2. Include specific numbers/stats when relevant (examples: "10 เท่า!", "5 เหรียญ Meme ที่อาจพุ่ง 1000%")
-3. Create curiosity gaps (examples:"เบื้องหลังการพุ่งทะยานของราคา...", "จับตา! สัญญาณที่บ่งชี้ว่า...")
-4. Make bold, specific statements (examples:"เหรียญคริปโตที่ดีที่สุด", "ทำไมวาฬถึงทุ่มเงินหมื่นล้านใส่...")
-The above guidelines are just examples. You must choose your own words or modify them to fit the context of the article.
+When creating section headings (H2) and subheadings (H3), use power words that often in appear in Thai crypto news headline or create curiosity, bold statements, or specific numbers/stats when relevant to show analytical value.
 
 Primary Keyword: {primary_keyword or ""}
 Secondary Keywords: {keywords or ""}
@@ -367,7 +385,7 @@ News Angle: {news_angle or ""}
 * Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
 * For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
 * Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
-* If the content contains numbers that represent monetary values, remove $ signs before numbers and add "ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
+* If the content contains numbers that represent monetary values, remove $ signs before numbers and add " ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
 
 # Promotional Content Guidelines
 {f'''
@@ -557,7 +575,7 @@ def main():
             )
         elif content_source == "Search and Generate":
             st.text_input("Enter your search query:", value=st.session_state.query, key="query")
-            st.slider("Hours to look back:", 1, 168, 12, key="hours_back")
+            st.slider("Hours to look back:", 1, 744, 12, key="hours_back")
         
         # Common input fields
         st.text_area(
