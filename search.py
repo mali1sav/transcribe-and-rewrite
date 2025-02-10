@@ -333,6 +333,8 @@ Primary Keyword: {primary_keyword or ""}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
+**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the article text.
+
 # Content Focus Instructions:
 * The article MUST be written from the perspective of the specified News Angle above
 * Only include information from sources that is relevant to and supports this news angle
