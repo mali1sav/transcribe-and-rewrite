@@ -1,44 +1,261 @@
 import os
-import pytz
-from datetime import datetime, timedelta, timezone
-import streamlit as st
-from urllib.parse import urlparse
-from exa_py import Exa
-import httpx
-from dateutil import parser
-from dotenv import load_dotenv
 import re
-import html
-import unicodedata
 import json
-import base64
-from together import Together
-import google.generativeai as genai
 import time
-import tenacity
-from pydantic import BaseModel
+import base64
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+from requests.auth import HTTPBasicAuth
 from firecrawl import FirecrawlApp
-import re
-import unicodedata
+import markdown
+import tenacity
+from datetime import datetime, timezone
+from typing import List, Optional
+from pydantic import BaseModel, Field
+import google.generativeai as genai
+from together import Together
 
 load_dotenv()
 
+# ------------------------------
+# Utility Functions
+# ------------------------------
+
+def escape_special_chars(text):
+    """Escape special characters that might interfere with Markdown formatting."""
+    text = re.sub(r'(?<!\$)\$(?!\$)', r'\$', text)
+    chars_to_escape = ['*', '_', '`', '#', '~', '|', '<', '>', '[', ']']
+    for char in chars_to_escape:
+        text = text.replace(char, '\\' + char)
+    return text
+
 def generate_slug(text):
-    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    """Generate a URL-friendly slug from text."""
     text = re.sub(r'[^\w\s-]', '', text.lower())
     return re.sub(r'[-\s]+', '-', text).strip('-_')
 
-def init_exa_client():
-    exa_api_key = os.getenv('EXA_API_KEY')
-    if not exa_api_key:
-        raise ValueError("EXA_API_KEY not found in environment variables")
-    return Exa(api_key=exa_api_key)
+def construct_endpoint(wp_url, endpoint_path):
+    """Construct the WordPress endpoint."""
+    wp_url = wp_url.rstrip('/')
+    if "/th" not in wp_url:
+        wp_url += "/th"
+    return f"{wp_url}{endpoint_path}"
 
-def get_domain(url):
+# ------------------------------
+# Data Models
+# ------------------------------
+
+class ArticleSection(BaseModel):
+    heading: str = Field(..., description="H2 heading with power words in Thai")
+    paragraphs: List[str] = Field(..., min_items=2, max_items=4, description="2-4 detailed paragraphs")
+
+class ArticleContent(BaseModel):
+    intro: str = Field(..., description="First paragraph with primary keyword")
+    sections: List[ArticleSection]
+    conclusion: str = Field(..., description="Summary emphasizing news angle")
+
+class Source(BaseModel):
+    domain: str
+    url: str
+
+class ArticleSEO(BaseModel):
+    slug: str = Field(..., description="English URL-friendly with primary keyword")
+    metaTitle: str = Field(..., description="Thai SEO title with primary keyword")
+    metaDescription: str = Field(..., description="Thai meta desc with primary keyword")
+    excerpt: str = Field(..., description="One Thai sentence summary")
+    imagePrompt: str = Field(..., description="English photo description")
+    altText: str = Field(..., description="Thai ALT text with English terms")
+
+class Article(BaseModel):
+    title: str = Field(..., description="Thai news-style title with primary keyword")
+    content: ArticleContent
+    sources: List[Source]
+    seo: ArticleSEO
+
+# ------------------------------
+# SEO Parsing Functions
+# ------------------------------
+
+def parse_article(article_json):
+    """
+    Parses the generated article JSON into structured elements.
+    Returns a dict with keys needed for WordPress upload.
+    """
     try:
-        return url.split('/')[2]
-    except:
-        return url
+        article = json.loads(article_json) if isinstance(article_json, str) else article_json
+        content_parts = []
+        content_parts.append(article['content']['intro'])
+        for section in article['content']['sections']:
+            content_parts.append(f"## {section['heading']}")
+            content_parts.extend(section['paragraphs'])
+            content_parts.append("")
+        content_parts.append(article['content']['conclusion'])
+        return {
+            "main_title": article['title'],
+            "main_content": "\n\n".join(content_parts),
+            "yoast_title": article['seo']['metaTitle'],
+            "yoast_metadesc": article['seo']['metaDescription'],
+            "seo_slug": article['seo']['slug'],
+            "excerpt": article['seo']['excerpt'],
+            "image_prompt": article['seo']['imagePrompt'],
+            "image_alt": article['seo']['altText']
+        }
+    except (json.JSONDecodeError, KeyError) as e:
+        st.error(f"Failed to parse article JSON: {str(e)}")
+        return {}
+
+# ------------------------------
+# WordPress Uploader Functions
+# ------------------------------
+
+def upload_image_to_wordpress(b64_data, wp_url, username, wp_app_password, filename="generated_image.png", alt_text="Generated Image"):
+    """
+    Uploads an image (provided as a base64 string) to WordPress.
+    Returns a dictionary with keys 'media_id' and 'source_url'.
+    """
+    try:
+        image_bytes = base64.b64decode(b64_data)
+    except Exception as e:
+        st.error(f"[Upload] Decoding error: {e}")
+        return None
+
+    media_endpoint = construct_endpoint(wp_url, "/wp-json/wp/v2/media")
+    st.write(f"[Upload] Uploading image to {media_endpoint} with alt text: {alt_text}")
+    try:
+        files = {'file': (filename, image_bytes, 'image/png')}
+        data = {'alt_text': alt_text, 'title': alt_text}
+        response = requests.post(media_endpoint, files=files, data=data, auth=HTTPBasicAuth(username, wp_app_password))
+        st.write(f"[Upload] Response status: {response.status_code}")
+        if response.status_code in (200, 201):
+            media_data = response.json()
+            media_id = media_data.get('id')
+            source_url = media_data.get('source_url', '')
+            st.write(f"[Upload] Received Media ID: {media_id}")
+            # Update media with alt text
+            update_endpoint = f"{media_endpoint}/{media_id}"
+            update_data = {'alt_text': alt_text, 'title': alt_text}
+            update_response = requests.put(update_endpoint, json=update_data, auth=HTTPBasicAuth(username, wp_app_password))
+            st.write(f"[Upload] Update response status: {update_response.status_code}")
+            if update_response.status_code in (200, 201):
+                st.success(f"[Upload] Image uploaded and alt text updated. Media ID: {media_id}")
+                return {"media_id": media_id, "source_url": source_url}
+            else:
+                st.error(f"[Upload] Alt text update failed. Status: {update_response.status_code}, Response: {update_response.text}")
+                return {"media_id": media_id, "source_url": source_url}
+        else:
+            st.error(f"[Upload] Image upload failed. Status: {response.status_code}, Response: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"[Upload] Exception during image upload: {e}")
+        return None
+
+def submit_article_to_wordpress(article, wp_url, username, wp_app_password, primary_keyword=""):
+    """
+    Submits the article to WordPress using the WP REST API.
+    """
+    endpoint = construct_endpoint(wp_url, "/wp-json/wp/v2/posts")
+    st.write("Submitting article with Yoast SEO fields...")
+    st.write("Yoast Title:", article.get("yoast_title"))
+    st.write("Yoast Meta Description:", article.get("yoast_metadesc"))
+    data = {
+        "title": article.get("main_title", "Untitled"),
+        "content": article.get("main_content", ""),
+        "slug": article.get("seo_slug") or generate_slug(article.get("main_title", "")),
+        "excerpt": article.get("excerpt", ""),
+        "status": "draft",
+        "meta_input": {
+            "_yoast_wpseo_title": article.get("yoast_title", ""),
+            "_yoast_wpseo_metadesc": article.get("yoast_metadesc", ""),
+            "_yoast_wpseo_focuskw": primary_keyword,
+            "_yoast_wpseo_title_val": article.get("yoast_title", ""),
+            "_yoast_wpseo_metadesc_val": article.get("yoast_metadesc", "")
+        }
+    }
+    keyword_to_cat_tag = {"Dogecoin": 527, "Bitcoin": 7}
+    if primary_keyword in keyword_to_cat_tag:
+        cat_tag_id = keyword_to_cat_tag[primary_keyword]
+        data["categories"] = [cat_tag_id]
+        data["tags"] = [cat_tag_id]
+    try:
+        response = requests.post(endpoint, json=data, auth=HTTPBasicAuth(username, wp_app_password))
+        if response.status_code in (200, 201):
+            post = response.json()
+            st.success(f"Article '{data['title']}' submitted successfully! Post ID: {post.get('id')}")
+            return post
+        else:
+            st.error(f"Failed to submit article. Status: {response.status_code}")
+            st.error(f"Response: {response.text}")
+            return None
+    except Exception as e:
+        st.error(f"Exception during article submission: {e}")
+        return None
+
+# ------------------------------
+# Jina-Based Extraction (Main Source)
+# ------------------------------
+
+def jina_extract_via_r(url: str) -> dict:
+    """
+    Uses the Jina REST API endpoint to extract content.
+    Returns extracted markdown content along with title and minimal SEO fields.
+    """
+    JINA_BASE_URL = "https://r.jina.ai/"
+    full_url = JINA_BASE_URL + url
+    try:
+        r = requests.get(full_url)
+    except Exception as e:
+        st.error(f"Jina request error: {e}")
+        return {"title": "Extracted Content", "content": {"intro": "", "sections": [], "conclusion": ""},
+                "seo": {"slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""}}
+    if r.status_code == 200:
+        text = r.text
+        md_index = text.find("Markdown Content:")
+        md_content = text[md_index + len("Markdown Content:"):].strip() if md_index != -1 else text.strip()
+        title_match = re.search(r"Title:\s*(.*)", text)
+        title = title_match.group(1).strip() if title_match else "Extracted Content"
+        fallback_json = {
+            "title": title,
+            "content": {"intro": md_content, "sections": [], "conclusion": ""},
+            "seo": {
+                "slug": generate_slug(title),
+                "metaTitle": title,
+                "metaDescription": title,
+                "excerpt": title,
+                "imagePrompt": "",  # To be set if desired
+                "altText": ""
+            }
+        }
+        return fallback_json
+    else:
+        st.error(f"Jina extraction failed with status code {r.status_code}")
+        return {"title": "Extracted Content", "content": {"intro": "", "sections": [], "conclusion": ""},
+                "seo": {"slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""}}
+
+def extract_url_content(gemini_client, url, messages_placeholder):
+    """
+    Extracts article content from a URL using Jina as the main source.
+    """
+    with messages_placeholder:
+        st.info(f"Extracting content from {url} using Jina...")
+    fallback_data = jina_extract_via_r(url)
+    with st.expander("Debug: Jina Extraction", expanded=False):
+        st.write("Jina extracted JSON:", fallback_data)
+    content_text = fallback_data.get("content", {}).get("intro", "") or ""
+    with st.expander("Debug: Jina Extracted Content", expanded=False):
+        st.write("Extracted content:", content_text)
+    return {
+        'title': fallback_data.get("title", "Extracted Content"),
+        'url': url,
+        'content': content_text,
+        'published_date': None,
+        'source': url,
+        'author': None
+    }
+
+# ------------------------------
+# Gemini Article Generation Functions
+# ------------------------------
 
 def init_gemini_client():
     """Initialize Google Gemini client."""
@@ -47,13 +264,9 @@ def init_gemini_client():
         if not api_key:
             st.error("Gemini API key not found. Please set GEMINI_API_KEY in your environment variables.")
             return None
-        
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        return {
-            'model': model,
-            'name': 'gemini-2.0-flash-exp'
-        }
+        return {'model': model, 'name': 'gemini-2.0-flash-exp'}
     except Exception as e:
         st.error(f"Failed to initialize Gemini client: {str(e)}")
         return None
@@ -64,882 +277,352 @@ def init_gemini_client():
     retry=tenacity.retry_if_exception_type((Exception)),
     retry_error_callback=lambda retry_state: None
 )
-def make_gemini_request(client, prompt):
-    """Make Gemini API request with retries and proper error handling"""
+def clean_gemini_response(text):
+    """Clean Gemini response to extract valid JSON."""
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*$', '', text)
+    return text.strip()
+
+def validate_article_json(json_str):
+    """Validate article JSON against schema and return cleaned data."""
     try:
-        # Add retry logic for Gemini API
+        data = json.loads(json_str)
+        if not data.get('title'):
+            raise ValueError("Missing required field: title")
+        if not data.get('content'):
+            raise ValueError("Missing required field: content")
+        if not data.get('seo'):
+            raise ValueError("Missing required field: seo")
+        content = data['content']
+        if not content.get('intro'):
+            raise ValueError("Missing required field: content.intro")
+        if not content.get('sections'):
+            raise ValueError("Missing required field: content.sections")
+        if not content.get('conclusion'):
+            raise ValueError("Missing required field: content.conclusion")
+        seo = data['seo']
+        required_seo = ['slug', 'metaTitle', 'metaDescription', 'excerpt', 'imagePrompt', 'altText']
+        for field in required_seo:
+            if not seo.get(field):
+                raise ValueError(f"Missing required SEO field: {field}")
+        return data
+    except json.JSONDecodeError as e:
+        line_no = e.lineno
+        col_no = e.colno
+        st.error(f"Invalid JSON at line {line_no}, column {col_no}: {str(e)}")
+        st.code(json_str, language="json")
+        raise
+    except ValueError as e:
+        st.error(f"Validation error: {str(e)}")
+        raise
+
+def make_gemini_request(client, prompt):
+    """Make Gemini API request with retries and proper error handling.
+    If Gemini’s response isn’t valid JSON, return a fallback JSON structure using the raw text.
+    """
+    try:
         for attempt in range(3):
             try:
                 response = client['model'].generate_content(prompt)
                 if response and response.text:
-                    return response.text
+                    cleaned_text = clean_gemini_response(response.text)
+                    if not cleaned_text.strip().startswith("{"):
+                        st.warning("Gemini response is not valid JSON. Using raw text fallback.")
+                        lines = cleaned_text.splitlines()
+                        title = lines[0].strip() if lines else "Untitled"
+                        fallback_json = {
+                            "title": title,
+                            "content": {"intro": cleaned_text, "sections": [], "conclusion": ""},
+                            "seo": {
+                                "slug": generate_slug(title),
+                                "metaTitle": title,
+                                "metaDescription": title,
+                                "excerpt": title,
+                                "imagePrompt": "",
+                                "altText": ""
+                            }
+                        }
+                        return fallback_json
+                    try:
+                        return validate_article_json(cleaned_text)
+                    except (json.JSONDecodeError, ValueError) as e:
+                        if attempt == 2:
+                            raise e
+                        st.warning("Invalid JSON format, retrying...")
+                        continue
             except Exception as e:
-                if attempt == 2:  # Last attempt
-                    raise
-                st.warning(f"Retrying Gemini request (attempt {attempt + 2}/3)...")
-                time.sleep(2 ** attempt)  # Exponential backoff
-                
+                if attempt == 2:
+                    raise e
+                st.warning(f"Retrying Gemini request (attempt {attempt+2}/3)...")
+                time.sleep(2**attempt)
         raise Exception("Failed to get valid response from Gemini API after all retries")
-            
     except Exception as e:
         st.error(f"Error making Gemini request: {str(e)}")
         raise
 
-class ArticleContent(BaseModel):
-    """Schema for article content extraction"""
-    title: str
-    author: str = None
-    published_date: str = None
-    content: str
-
-def extract_with_firecrawl(url):
-    try:
-        api_key = os.getenv('FIRECRAWL_API_KEY')
-        if not api_key:
-            st.error("Firecrawl API key not found. Please set FIRECRAWL_API_KEY in your environment")
-            return None
-            
-        app = FirecrawlApp(api_key=api_key)
-        
-        # Define extraction schema
-        class NestedModel1(BaseModel):
-            title: str
-            author: str = None
-            published_date: str = None
-            content: str
-
-        class ExtractSchema(BaseModel):
-            article: NestedModel1
-            
-        data = app.extract([url], {
-            'prompt': 'Extract the article title, author, published date, and content. Ensure the title and content are always included.',
-            'schema': ExtractSchema.model_json_schema(),
-        })
-        
-        if data and data.get('success') and data.get('data'):
-            article = data['data'].get('article')
-            if article:
-                return {
-                    'title': article.get('title'),
-                    'author': article.get('author'),
-                    'published_date': article.get('published_date'),
-                    'text': article.get('content')
-                }
-        
-        st.warning("Firecrawl could not extract content")
-        return None
-            
-    except Exception as e:
-        st.error(f"Firecrawl extraction failed: {str(e)}")
-        return None
-
-def extract_url_content(gemini_client, url, messages_placeholder):
-    """Extract article content using Firecrawl first, then fallback to Gemini if needed."""
-    try:
-        # First try with Firecrawl
-        with messages_placeholder:
-            st.info(f"Attempting to extract content from {url} using Firecrawl...")
-        fc_content = extract_with_firecrawl(url)
-        if fc_content:
-            return {
-                'title': fc_content.get('title', 'Extracted Content'),
-                'url': url,
-                'text': fc_content.get('text', ''),
-                'published_date': None,
-                'source': url,
-                'author': fc_content.get('author')
-            }
-        
-        # If Firecrawl fails, try Gemini
-        with messages_placeholder:
-            st.info(f"Firecrawl failed, trying Gemini for {url}...")
-        prompt = f"""Extract the main article content from this URL: {url}
-        Return ONLY the article text content, no additional formatting or commentary.
-        If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
-        
-        response = make_gemini_request(gemini_client, prompt)
-        
-        if response and 'EXTRACTION_FAILED' not in response:
-            return {
-                'title': 'Extracted Content',
-                'url': url,
-                'text': response,
-                'published_date': None,
-                'source': url,
-                'author': None
-            }
-        
-        return None
-    except Exception as e:
-        print(f"Error extracting content from {url}: {str(e)}")
-        return None
-
-# ---------------------------------------------------------------------------
-# Helper function to sanitize text by removing control characters.
-# This will remove non-printable characters that make the text look corrupted.
-# ---------------------------------------------------------------------------
-def sanitize_text(text):
-    # Remove control characters (except newline and tab)
-    return ''.join(ch for ch in text if unicodedata.category(ch)[0] != "C" or ch in "\n\t ")
-
-# ---------------------------------------------------------------------------
-# MODIFIED: Use a full day filter instead of a relative 'hours_back' filter.
-# This now defaults to today's full day in UTC to match Exa's playground behavior.
-# ---------------------------------------------------------------------------
-def perform_exa_search(exa_client, query, num_results=10, specific_date=None):
-    try:
-        if specific_date:
-            # If a specific date is provided, use that day’s full range.
-            start_date = datetime(specific_date.year, specific_date.month, specific_date.day, 0, 0, 0, tzinfo=timezone.utc)
-            end_date = datetime(specific_date.year, specific_date.month, specific_date.day, 23, 59, 59, 999000, tzinfo=timezone.utc)
-        else:
-            # Default: use today's full day in UTC.
-            now = datetime.now(timezone.utc)
-            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            end_date = now.replace(hour=23, minute=59, second=59, microsecond=999000)
-        
-        start_date_str = start_date.strftime('%Y-%m-%dT%H:%M:%S.000Z')
-        end_date_str = end_date.strftime('%Y-%m-%dT%H:%M:%S.999Z')
-        
-        response = exa_client.search_and_contents(
-            query=query,
-            num_results=num_results,
-            start_published_date=start_date_str,
-            end_published_date=end_date_str,
-            type='auto',
-            category='news',
-            text=True
-        )
-        
-        if not response:
-            return []
-            
-        results = getattr(response, 'results', None) or response
-        all_results = []
-        
-        excluded_domains = ['twitter.com', 'youtube.com', 'youtu.be']
-        
-        for result in results:
-            # Get URL and check against excluded domains
-            url = str(getattr(result, 'url', '') or '')
-            domain = get_domain(url)
-            if any(excluded in domain for excluded in excluded_domains):
-                continue
-                
-            title = str(getattr(result, 'title', 'No Title') or 'No Title')
-            text = str(getattr(result, 'text', '') or '')
-            
-            # Sanitize the text to remove corrupted/control characters.
-            text = sanitize_text(text)
-            
-            # Parse date if available
-            published_date = None
-            if hasattr(result, 'published_date') and result.published_date:
-                try:
-                    parsed = parser.parse(result.published_date)
-                    if not parsed.tzinfo:
-                        parsed = parsed.replace(tzinfo=timezone.utc)
-                    published_date = parsed.isoformat()
-                except:
-                    pass
-            
-            transformed_result = {
-                'title': title,
-                'url': url,
-                'published_date': published_date,
-                'text': text,
-                'source': domain
-            }
-            all_results.append(transformed_result)
-            
-        if all_results:
-            st.success(f"✅ Found {len(all_results)} results from Exa")
-            
-        return all_results
-        
-    except Exception as e:
-        st.error(f"Error during Exa search: {str(e)}")
-        return []
-
-def perform_web_research(exa_client, query, hours_back, search_engines=None):
-    """
-    Perform web research using available search engines.
-    Currently using Exa for comprehensive search results.
-    """
-    results = []
-    
-    try:
-        # Get results from Exa
-        exa_results = perform_exa_search(
-            exa_client=exa_client,
-            query=query,
-            num_results=10  # Adjust num_results as needed
-            # Note: The hours_back parameter is no longer used here.
-        )
-        if exa_results:
-            results.extend(exa_results)
-            
-        return results
-    except Exception as e:
-        st.error(f"Error during web research: {str(e)}")
-        return []
-
-def serialize_search_results(search_results):
-    if not search_results:
-        return {"results": []}
-    serialized_results = {
-        "results": [
-            {
-                "title": r["title"],
-                "url": r["url"],
-                "text": r["text"],
-                "published_date": r["published_date"],
-                "source": r["source"]
-            }
-            for r in search_results
-        ]
-    }
-    return serialized_results
-
-def prepare_content_for_article(selected_results):
-    """Takes a list of results, each with 'url','source','text', and returns a 'transcript' list for GPT."""
-    try:
-        prepared_content = []
-        for result in selected_results:
-            url = result.get('url', '').strip()
-            source = result.get('source', '').strip()
-            # Handle both 'text' and 'content' fields for compatibility
-            content = result.get('content', result.get('text', '')).strip()
-            
-            content_item = {
-                'url': url,
-                'source': source,
-                'content': content  # Changed from 'text' to match generate_article's expected format
-            }
-            prepared_content.append(content_item)
-        return prepared_content
-    except Exception as e:
-        st.error(f"Error preparing content: {str(e)}")
-        return []
-
-def escape_special_chars(text):
-    """Escape special characters that might interfere with Markdown formatting."""
-    # Escape dollar signs that aren't already part of a LaTeX equation
-    text = re.sub(r'(?<!\$)\$(?!\$)', r'\$', text)
-    # Escape other special Markdown characters
-    chars_to_escape = ['*', '_', '`', '#', '~', '|', '<', '>', '[', ']']
-    for char in chars_to_escape:
-        text = text.replace(char, '\\' + char)
-    return text
-
 def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
+    """
+    Generates a comprehensive news article in Thai using the Gemini API.
+    Uses the extracted source content from Jina verbatim in the prompt.
+    Returns a JSON-structured article following the Article schema.
+    """
     try:
         if not transcripts:
             return None
-
-        # Keywords should already be a list from the text area split
         keyword_list = keywords if keywords else []
-        primary_keyword = keyword_list[0].upper() if keyword_list else ""
+        primary_keyword = keyword_list[0] if keyword_list else ""
         secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
         
-        shortcode_map = {
-            "BITCOIN": '[latest_articles label="ข่าว Bitcoin (BTC) ล่าสุด" count_of_posts="6" taxonomy="category" term_id="7"]',
-            "ETHEREUM": '[latest_articles label="ข่าว Ethereum ล่าสุด" count_of_posts="6" taxonomy="category" term_id="8"]',
-            "SOLANA": '[latest_articles label="ข่าว Solana ล่าสุด" count_of_posts="6" taxonomy="category" term_id="501"]',
-            "XRP": '[latest_articles label="ข่าว XRP ล่าสุด" count_of_posts="6" taxonomy="category" term_id="502"]',
-            "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
-        }
-        
-        prompt = f"""
-Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), use power words that often in appear in Thai crypto news headline or create curiosity, bold statements, or specific numbers/stats when relevant to show analytical value.
-
-Primary Keyword: {primary_keyword or ""}
-Secondary Keywords: {keywords or ""}
-News Angle: {news_angle or ""}
-
-**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the title, meta description, h1, and article text.
-
-# Content Focus Instructions:
-* The article MUST be written from the perspective of the specified News Angle above
-* Only include information from sources that is relevant to and supports this news angle
-* Analyze each source and extract only the content that aligns with or provides context for the news angle
-* If a source contains information not relevant to the news angle, exclude it
-* Ensure each section contributes to developing the specified news angle
-* Maintain focus throughout the article - avoid tangents or unrelated information
-
-# Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article, and be embedded in the intro section's sentence in a natural, contextual manner, using markdown hyperlinks like this [Source domain name](url)
-
-# Main Content (also applicable to H1,H2, Title, and Meta Description) Guidelines:
-* Keep the following terms in English, rest in Thai:
-  - Technical terms
-  - Entity names
-  - People names
-  - Place names (including cities, states, countries)
-  - Organizations
-  - Company names
-  - Cryptocurrency names (use proper capitalization: "Bitcoin", not "BITCOIN" or "bitcoin")
-  - Platform names
-  - Government entities (e.g., "Illinois State", not "รัฐอิลลินอยส์")
-* Use proper capitalization for all terms:
-  - Cryptocurrencies: "Bitcoin", "Ethereum", "Solana"
-  - Companies: "Binance", "Coinbase"
-  - Organizations: "Federal Reserve", "Securities and Exchange Commission"
-  - Never use ALL CAPS unless it's a widely recognized acronym (e.g., "FBI", "SEC")
-
-* Ensure to avoid unintended Markdown or LaTeX formatting.
-* Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
-* For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
-* Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
-* If the content contains numbers that represent monetary values, remove $ signs before numbers and add " ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
-
-# Promotional Content Guidelines
-{f'''
-**Promotional Integration Guidelines**
-----------------------------------------
-{promotional_text}
-
-* Requirements:
-  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English but the rest of sentence in Thai).
-  2. The content must be in Thai (keep technical terms and entity names in English but the rest in Thai).
-  3. Transit seamlessly from the main content into the promotional text.
-  4. Find a way to mention {primary_keyword} in a seamless way.
-  5. Limit promotional text to 120 words, placed at the end of the article.
-''' if promotional_text else ''}
-
-# Article Structure:
-## Title
-[Create an engaging news-style title that includes {primary_keyword} once, maintaining its original form]
-
-## Main Content
-[First paragraph must include {primary_keyword} once in its original form]
-
-[Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
-
-[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. Do not repeat the same source attribution more than once in the entire article.
-]
-
-[Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
-
-## SEO Elements
-1. Title Options (include {primary_keyword} once, maintain original form):
-   - [Option 1: News-focused title]
-   - [Option 2: Number-focused title]
-   - [Option 3: Question-based title]
-
-2. Meta Description Options (include {primary_keyword} once):
-   - [Option 1: News angle + key benefit]
-   - [Option 2: Number-focused]
-   - [Option 3: Question to stimulate curiosity]
-
-3. H1 Options (aligned with Title and Meta Description including {primary_keyword}):
-   - [Option 1: Direct news statement]
-   - [Option 2: Number-focused statement]
-   - [Option 3: Engaging question]
-
-## Additional Elements
-Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
-- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
-- Excerpt for WordPress: One sentence in Thai that briefly describes the article
-
-## Image Prompt
-[Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Don't include anything from promotional content. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.]
-
-# Source Usage Instructions:
-* Use provided sources as primary reference for facts and data
-* Your knowledge can supplement for context and understanding, but never override source information
-* When source information exists on a topic, it takes precedence over general knowledge
-
-Here are the sources to base the article on:
-"""
-        # Append transcripts with escaped special characters, ensuring each source attribution appears only once
+        # Concatenate source content from all transcripts with clear delimiters.
+        source_texts = ""
         seen_sources = set()
         for t in transcripts:
-            source = t['source']
+            content = t.get('content') or ""
+            source = t.get('source', 'Unknown')
             if source not in seen_sources:
                 seen_sources.add(source)
-                prompt += f"### Content from {source}\nSource URL: {t['url']}\n{escape_special_chars(t['content'])}\n\n"
+                source_texts += f"\n---\nSource: {source}\nURL: {t.get('url', '')}\n\n{content}\n---\n"
             else:
-                prompt += f"{escape_special_chars(t['content'])}\n\n"
+                source_texts += f"\n{content}\n"
+        
+        # Construct the Gemini prompt with strict instructions.
+        prompt = f"""
+You are an expert Thai crypto journalist. Using ONLY the exact source content provided below, craft a news article in Thai. DO NOT invent or modify any factual details. Your article must faithfully reflect the provided source text.
 
-        # Make API request with retries and error handling
+Primary Keyword: {primary_keyword}
+Secondary Keywords: {secondary_keywords}
+News Angle: {news_angle}
+
+Structure your output as valid JSON with the following keys:
+- title: A news-style title in Thai that includes the primary keyword exactly.
+- content: An object with:
+   - intro: An introduction paragraph in Thai that naturally embeds one concise attribution in the format [Source Name](Source URL). Include each source only once.
+   - sections: An array of exactly {section_count} objects, each with:
+         - heading: An H2 heading in Thai using power words.
+         - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content. For each section, if multiple image markdown links appear, include only the first one. Do not include any featured images.
+   - conclusion: A concluding paragraph summarizing the article.
+- sources: An array of objects with keys "domain" and "url" for each source (each included only once).
+- seo: An object with keys "slug", "metaTitle", "metaDescription", "excerpt", "imagePrompt", "altText". In the title, metaTitle, and metaDescription, ensure the primary keyword appears exactly once.
+
+IMPORTANT: DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
+
+Below is the source content (in markdown) extracted from the articles:
+{source_texts}
+
+Return ONLY valid JSON, no additional commentary.
+"""
         content = make_gemini_request(client, prompt)
         if not content:
             return None
-            
-        shortcode = shortcode_map.get(primary_keyword, "")
-        
-        # 1) Insert the relevant shortcode in the final text
-        if shortcode:
-            excerpt_split = "Excerpt for WordPress:"
-            if excerpt_split in content:
-                parts = content.split(excerpt_split, 1)
-                content = (
-                    parts[0].rstrip() + "\n\n" +
-                    shortcode + "\n\n----------------\n\n" +
-                    excerpt_split + parts[1]
-                )
-            else:
-                content += f"\n\n{shortcode}\n\n----------------\n"
-        
-        # 2) Post-processing to remove "$" and replace with " ดอลลาร์"
-        content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
-        
         return content
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return None
 
-def load_promotional_content():
-    """Load promotional content from files in the pr directory."""
-    pr_dir = os.path.join(os.path.dirname(__file__), 'pr')
-    content_map = {}
-    
-    if os.path.exists(pr_dir):
-        for filename in os.listdir(pr_dir):
-            if filename.endswith('.txt'):
-                filepath = os.path.join(pr_dir, filename)
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        content = f.read().strip()
-                        # Use filename without extension as key
-                        name = os.path.splitext(filename)[0]
-                        content_map[name] = content
-                except Exception as e:
-                    print(f"Error loading {filename}: {str(e)}")
-    
-    return content_map
+# ------------------------------
+# Image Processing Function
+# ------------------------------
 
-def extract_image_prompt(article_text):
-    pattern = r"(?i)Image Prompt.*?\n(.*)"
-    match = re.search(pattern, article_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+def process_article_images(article_text, wp_url, wp_username, wp_app_password):
+    """
+    Finds markdown image links in article_text (ignoring those with 'featured' in alt text),
+    downloads each image, uploads it to WordPress, and replaces the markdown with a full <img> tag
+    using the returned source URL.
+    """
+    pattern = r'!\[([^\]]+)\]\(([^)]+)\)'
+    matches = re.findall(pattern, article_text)
+    st.write("DEBUG: Found image markdown matches:", matches)
+    for alt, url in matches:
+        if "featured" in alt.lower():
+            continue  # Skip featured images
+        st.write(f"DEBUG: Processing image: alt='{alt}', url='{url}'")
+        try:
+            img_response = requests.get(url)
+            if img_response.status_code == 200:
+                b64_data = base64.b64encode(img_response.content).decode('utf-8')
+                # Print WP credentials (masked)
+                st.write(f"DEBUG: WP credentials - URL: {wp_url}, Username: {wp_username}, App Password: {wp_app_password[:3]}***")
+                upload_result = upload_image_to_wordpress(b64_data, wp_url, wp_username, wp_app_password)
+                if upload_result and "media_id" in upload_result and "source_url" in upload_result:
+                    media_id = upload_result["media_id"]
+                    source_url = upload_result["source_url"]
+                    # Construct a full image tag with the WP source URL
+                    new_img_tag = f'<img class="alignnone wp-image-{media_id}" src="{source_url}" alt="{alt}" />'
+                    st.write(f"DEBUG: Replacing image markdown with: {new_img_tag}")
+                    # Replace the markdown with the full image tag
+                    article_text = article_text.replace(f"![{alt}]({url})", new_img_tag)
+                else:
+                    st.error(f"DEBUG: Media upload failed for image {url}")
+            else:
+                st.error(f"DEBUG: Failed to download image {url}: Status code {img_response.status_code}")
+        except Exception as e:
+            st.error(f"DEBUG: Exception processing image {url}: {e}")
+    return article_text
 
-def extract_alt_text(article_text):
-    pattern = r"(?i)Image ALT Text.*?\n(.*?)(?:\n\n|\Z)"
-    match = re.search(pattern, article_text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return None
+# ------------------------------
+# Main App Function
+# ------------------------------
 
 def main():
-    st.set_page_config(page_title="Search and Generate Articles", layout="wide")
+    st.set_page_config(page_title="Generate and Upload Article", layout="wide")
     
-    # Initialize session state
-    if 'keywords' not in st.session_state:
-        st.session_state.keywords = "Bitcoin"
-    if 'query' not in st.session_state:
-        st.session_state.query = "Strategic Bitcoin Reserve - Latest news"
-    if 'selected_indices' not in st.session_state:
-        st.session_state.selected_indices = []
-    if 'article' not in st.session_state:
-        st.session_state.article = None
-    if 'generating' not in st.session_state:
-        st.session_state.generating = False
-    if 'search_results' not in st.session_state:
-        st.session_state.search_results = None
-    if 'search_results_json' not in st.session_state:
-        st.session_state.search_results_json = None
-    if 'process_urls' not in st.session_state:
-        st.session_state.process_urls = False
-    if 'urls_to_process' not in st.session_state:
-        st.session_state.urls_to_process = None
-
-    try:
-        exa_client = init_exa_client()
-        gemini_client = init_gemini_client()
-        if not gemini_client:
-            st.error("Failed to initialize Gemini client")
-            return
-    except Exception as e:
-        st.error(f"❌ Failed to initialize clients: {str(e)}")
+    # Default values:
+    default_url = "https://cointelegraph.com/news/bitcoin-traders-say-400-k-btc-price-possible-3-key-events-occur"
+    default_keyword = "Bitcoin"
+    default_news_angle = "Bitcoin traders say $400K BTC price is possible if 3 key events occurs"
+    
+    gemini_client = init_gemini_client()
+    if not gemini_client:
+        st.error("Failed to initialize Gemini client")
         return
-
-    # Create a placeholder for messages in the main area
+    
+    st.sidebar.header("Article Generation")
+    urls_input = st.sidebar.text_area("Enter URLs (one per line) to extract content from:", value=default_url)
+    keywords_input = st.sidebar.text_area("Keywords (one per line):", value=default_keyword)
+    news_angle = st.sidebar.text_input("News Angle:", value=default_news_angle)
+    section_count = st.sidebar.slider("Number of sections:", 2, 8, 3)
+    
+    st.sidebar.header("WordPress Credentials")
+    wp_url = st.sidebar.text_input("WordPress Site URL:", value=os.getenv("wp_url", ""))
+    wp_username = st.sidebar.text_input("WordPress Username:", value=os.getenv("wp_username", ""))
+    wp_app_password = st.sidebar.text_input("WordPress App Password:", type="password", value=os.getenv("wp_app_password", ""))
+    
     messages_placeholder = st.empty()
-
-    # -------------------------------
-    # SIDEBAR: Re-ordered UI Elements
-    # -------------------------------
-    with st.sidebar:
-        # Radio buttons at the top
-        content_source = st.radio(
-            "How would you like to generate your article?",
-            ["Generate from URLs", "Search and Generate"],
-            key="content_source"
-        )
-        
-        # Content source–specific input boxes immediately below the radio buttons
-        if content_source == "Generate from URLs":
-            st.text_area(
-                "URLs to Extract",
-                height=100,
-                key="user_main_text",
-                help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed using Firecrawl or Gemini."
+    
+    if st.sidebar.button("Generate Article"):
+        if not urls_input.strip():
+            st.error("Please enter at least one URL.")
+            return
+        urls = [line.strip() for line in urls_input.splitlines() if line.strip()]
+        transcripts = []
+        for url in urls:
+            extracted = extract_url_content(gemini_client, url, messages_placeholder)
+            if extracted:
+                transcripts.append(extracted)
+        if transcripts:
+            article_content = generate_article(
+                gemini_client,
+                transcripts,
+                keywords=keywords_input.splitlines(),
+                news_angle=news_angle,
+                section_count=section_count,
+                promotional_text=None
             )
-        elif content_source == "Search and Generate":
-            st.text_input("Enter your search query:", value=st.session_state.query, key="query")
-            st.slider("Hours to look back:", 1, 744, 12, key="hours_back")
-        
-        # Common input fields
-        st.text_area(
-            "Keywords (one per line)",
-            height=68,
-            key="keywords",
-            help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
-        )
-        news_angle = st.text_input(
-            "News Angle",
-            value="",
-            key="news_angle",
-            help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective.
-            Tips: You can use one of the English headlines from your selected news sources as your news angle."""
-        )
-        section_count = st.slider("Number of sections:", 2, 8, 3, key="section_count")
-        
-        # Promotional content selection
-        promotional_content = load_promotional_content()
-        st.write("Promotional Content")
-        selected_promotions = []
-        for name in sorted(promotional_content.keys()):
-            if st.checkbox(name, key=f"promo_{name}"):
-                selected_promotions.append(promotional_content[name])
-        promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
-
-        # Action button positioned at the bottom of the sidebar
-        if content_source == "Generate from URLs":
-            action_clicked = st.button("Generate Article from URLs", type="primary")
-        elif content_source == "Search and Generate":
-            action_clicked = st.button("Search Content", type="primary")
-
-    # --------------------------------
-    # MAIN AREA: Process Action Buttons
-    # --------------------------------
-    if action_clicked:
-        if content_source == "Generate from URLs":
-            user_main_text = st.session_state.get("user_main_text", "")
-            if not user_main_text.strip():
-                with messages_placeholder:
-                    st.error("Please enter at least one URL in the URLs to Extract box")
+            if article_content:
+                st.session_state.article = json.dumps(article_content, ensure_ascii=False, indent=2)
+                st.success("Article generated successfully!")
             else:
-                st.session_state.generating = True
-                st.session_state.selected_indices = []  # Clear any previous selections
-                st.session_state.process_urls = True
-                st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
-        elif content_source == "Search and Generate":
-            query = st.session_state.get("query", st.session_state.query)
-            hours_back = st.session_state.get("hours_back", 12)
-            st.session_state.process_urls = False
-            results = perform_web_research(
-                exa_client=exa_client,
-                query=query,
-                hours_back=hours_back
-            )
-            if results:
-                st.session_state.search_results = serialize_search_results(results)
-                st.session_state.search_results_json = json.dumps(
-                    st.session_state.search_results, 
-                    ensure_ascii=False, 
-                    indent=4
-                )
-            else:
-                with messages_placeholder:
-                    st.error("No results found. Try adjusting your search parameters.")
-
-    # --------------------------------
-    # MAIN AREA: Display Search Results and Process URLs
-    # --------------------------------
-    # Show search results if available (from "Search and Generate")
-    if st.session_state.search_results:
-        results = st.session_state.search_results
-        st.subheader("Search Results")
-            
-        for idx, result in enumerate(results['results']):
-            with st.container():
-                cols = st.columns([0.05, 0.95])
-                with cols[0]:
-                    is_selected = idx in st.session_state.selected_indices
-                    if st.checkbox("", value=is_selected, key=f"select_{idx}"):
-                        if idx not in st.session_state.selected_indices:
-                            st.session_state.selected_indices.append(idx)
-                    else:
-                        if idx in st.session_state.selected_indices:
-                            st.session_state.selected_indices.remove(idx)
-                
-                with cols[1]:
-                    title = result['title']
-                    source = result['source']
-                    url = result['url']
-                    published_date = result['published_date'] or "Unknown time"
-                        
-                    def format_local_date(iso_date):
-                        if not iso_date:
-                            return "Unknown time"
-                        try:
-                            utc_time = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
-                            local_tz = pytz.timezone('Asia/Bangkok')  # Default to Bangkok time
-                            local_time = utc_time.astimezone(local_tz)
-                            return local_time.strftime('%Y-%m-%d %H:%M:%S')
-                        except:
-                            return "Unknown time"
-                        
-                    formatted_date = format_local_date(published_date)
-                    st.markdown(f'<div class="search-result"><a href="{url}" target="_blank">{title}</a><br><span class="search-result-source">Source: {source} | Published: {formatted_date}</span></div>', unsafe_allow_html=True)
-                        
-                    preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
-                    st.markdown(preview)
-                    with st.expander("Show full content"):
-                        st.write(result['text'])
-        
-        if st.session_state.selected_indices:
-            if st.button("Generate Article from all sources", type="primary"):
-                st.session_state.generating = True
-                
-                # Prepare content from selected search results
-                prepared_content = []
-                for idx in st.session_state.selected_indices:
-                    result = results['results'][idx]
-                    prepared_content.append({
-                        "url": result['url'],
-                        "source": result['source'],
-                        "content": result['text']
-                    })
-                
-                # Add additional content if provided (only applicable if "Generate from URLs" was used)
-                if content_source == "Generate from URLs":
-                    additional_content = []
-                    for line in st.session_state.get("user_main_text", "").strip().split('\n'):
-                        line = line.strip()
-                        if line.startswith('http://') or line.startswith('https://'):
-                            st.session_state.status_message = f"Extracting content from {line}..."
-                            extracted = extract_url_content(gemini_client, line, messages_placeholder)
-                            if extracted:
-                                additional_content.append(extracted)
-                        elif line:  # If it's not a URL but has content
-                            additional_content.append({
-                                'title': 'User Provided Content',
-                                'url': '',
-                                'text': line,
-                                'published_date': None,
-                                'source': 'User Input',
-                                'author': None
-                            })
-                    
-                    for item in additional_content:
-                        prepared_content.append({
-                            "url": item.get('url', ''),
-                            "source": item.get('source', 'User Input'),
-                            "content": item.get('text', '')
-                        })
-                
-                if prepared_content:
-                    try:
-                        with messages_placeholder:
-                            st.info("Generating article...")
-                        # Convert keywords string to list if it exists
-                        keywords = st.session_state.keywords.split('\n') if st.session_state.keywords else []
-                        
-                        # Always include promotional text if provided
-                        promo_text = promotional_text.strip() if promotional_text else None
-                        
-                        article = generate_article(
-                            client=gemini_client,
-                            transcripts=prepared_content,
-                            keywords=keywords,
-                            news_angle=st.session_state.news_angle if st.session_state.news_angle.strip() else None,
-                            section_count=st.session_state.section_count,
-                            promotional_text=promo_text
-                        )
-                        if article:
-                            st.session_state.article = article
-                            with messages_placeholder:
-                                st.success("Article generated successfully!")
-                        else:
-                            with messages_placeholder:
-                                st.error("Failed to generate article. Please try again.")
-                    except Exception as e:
-                        with messages_placeholder:
-                            st.error(f"Error generating article: {str(e)}")
-                else:
-                    with messages_placeholder:
-                        st.error("No content available to generate article from")
-                    st.session_state.generating = False
-
-    # Process URLs section (for "Generate from URLs" option)
-    if st.session_state.process_urls and st.session_state.urls_to_process:
-        additional_content = []
-        for line in st.session_state.urls_to_process:
-            try:
-                extracted = extract_url_content(gemini_client, line, messages_placeholder)
-                if extracted:
-                    additional_content.append(extracted)
-                    with messages_placeholder:
-                        st.success(f"Successfully extracted content from {line}")
-                else:
-                    with messages_placeholder:
-                        st.error(f"Both Firecrawl and Gemini failed to extract content from {line}")
-            except Exception as e:
-                with messages_placeholder:
-                    st.error(f"Error extracting content from {line}: {str(e)}")
-
-        if additional_content:
-            prepared_content = []
-            for item in additional_content:
-                prepared_content.append({
-                    "url": item.get('url', ''),
-                    "source": item.get('source', 'User Input'),
-                    "content": item.get('text', '')
-                })
-                
-            try:
-                with messages_placeholder:
-                    st.info("Generating article...")
-                keywords = [k.strip() for k in st.session_state.keywords.split('\n') if k.strip()]
-                promo_text = promotional_text.strip() if promotional_text else None
-                article = generate_article(
-                    client=gemini_client,
-                    transcripts=prepared_content,
-                    keywords=keywords,
-                    news_angle=st.session_state.news_angle if st.session_state.news_angle.strip() else None,
-                    section_count=st.session_state.section_count,
-                    promotional_text=promo_text
-                )
-                if article:
-                    st.session_state.article = article
-                    with messages_placeholder:
-                        st.success("Article generated successfully!")
-                else:
-                    with messages_placeholder:
-                        st.error("Failed to generate article. Please try again.")
-            except Exception as e:
-                with messages_placeholder:
-                    st.error(f"Error generating article: {str(e)}")
+                st.error("Failed to generate article.")
         else:
-            with messages_placeholder:
-                st.error("No content could be extracted from the provided URLs")
+            st.error("No content extracted from provided URLs.")
+    
+    if "article" in st.session_state and st.session_state.article:
+        st.subheader("Generated Article (JSON)")
+        try:
+            article_json = json.loads(st.session_state.article)
+            st.json(article_json)
+            st.subheader("Article Content Preview")
+            st.write(f"**{article_json['title']}**")
+            st.write(article_json['content']['intro'])
+            for section in article_json['content']['sections']:
+                st.write(f"### {section['heading']}")
+                for para in section['paragraphs']:
+                    st.write(para)
+                st.write("")
+            st.write("**บทสรุป:**")
+            st.write(article_json['content']['conclusion'])
+        except json.JSONDecodeError as e:
+            st.error(f"Invalid JSON format: {str(e)}")
+            st.text_area("Raw Content", value=st.session_state.article, height=300)
         
-        # Reset URL processing flags
-        st.session_state.process_urls = False
-        st.session_state.urls_to_process = None
-        st.session_state.generating = False
-
-    # Show generated article at the bottom
-    if st.session_state.article:
-        st.markdown("---")  # Visual separator
-        st.subheader("Generated Article")
-        cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
-        cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
-        cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)
-        st.markdown(cleaned_article)
-            
-        st.download_button(
-            label="Download Article",
-            data=st.session_state.article,
-            file_name="generated_article.md",
-            mime="text/markdown",
-            use_container_width=True
-        )
-
-        # Handle image generation
-        image_prompt = extract_image_prompt(st.session_state.article)
-        alt_text = extract_alt_text(st.session_state.article)
-            
-        if image_prompt:
-            st.session_state.status_message = "Generating image from Together AI..."
-            together_client = Together()
-            try:
-                response = together_client.images.generate(
-                    prompt=image_prompt,
-                    model="black-forest-labs/FLUX.1-schnell-free",
-                    width=1200,
-                    height=800,
-                    steps=4,
-                    n=1,
-                    response_format="b64_json"
-                )
-                    
-                if response and response.data and len(response.data) > 0:
-                    b64_data = response.data[0].b64_json
-                    st.image(
-                        "data:image/png;base64," + b64_data,
-                        caption=alt_text or "Generated image"
-                    )
-                else:
-                    st.session_state.error_message = "Failed to generate image from Together AI."
-            except Exception as e:
-                st.session_state.error_message = f"Error generating image: {str(e)}"
+        # Process images: download images from markdown and upload to WP
+        parsed = parse_article(st.session_state.article)
+        if parsed.get("main_content"):
+            processed_content = process_article_images(parsed["main_content"], wp_url, wp_username, wp_app_password)
+            parsed["main_content"] = processed_content
         
-        if st.session_state.article:
-            if st.button("Save Article Data to JSON", type="primary"):
-                # Extract image data
-                image_prompt = extract_image_prompt(st.session_state.article)
-                alt_text = extract_alt_text(st.session_state.article)
-                
-                # Extract b64_data
-                b64_data = None
-                if image_prompt:
-                    together_client = Together()
-                    try:
-                        response = together_client.images.generate(
-                            prompt=image_prompt,
-                            model="black-forest-labs/FLUX.1-schnell-free",
-                            width=1200,
-                            height=800,
-                            steps=4,
-                            n=1,
-                            response_format="b64_json"
-                        )
-                        if response and response.data and len(response.data) > 0:
-                            b64_data = response.data[0].b64_json
-                    except Exception as e:
-                        st.error(f"Error generating image: {str(e)}")
-                
-                # Extract title, content, excerpt, and meta description
-                title_pattern = r"## Title\n(.*?)\n"
-                title_match = re.search(title_pattern, st.session_state.article)
-                title = title_match.group(1) if title_match else "No Title"
-                
-                content_pattern = r"## Main Content\n(.*?)(?=(## SEO Elements)|(----)|(\Z))"
-                content_match = re.search(content_pattern, st.session_state.article, re.DOTALL)
-                content = content_match.group(1) if content_match else "No Content"
-                
-                excerpt_pattern = r"Excerpt for WordPress:\s*(.*?)\s*(?:\n|$)"
-                excerpt_match = re.search(excerpt_pattern, st.session_state.article)
-                excerpt = excerpt_match.group(1) if excerpt_match else ""
-                
-                meta_description_pattern = r"Meta Description Options \(include.*\):\s*-\s*(.*?)\s*(?:\n|$)"
-                meta_description_match = re.search(meta_description_pattern, st.session_state.article)
-                meta_description = meta_description_match.group(1) if meta_description_match else ""
-                
-                # Generate slug
-                slug = generate_slug(title)
-                
-                # Create JSON data
-                article_data = {
-                    "title": title,
-                    "content": content,
-                    "slug": slug,
-                    "excerpt": excerpt,
-                    "meta_description": meta_description,
-                    "image": {
-                        "b64_data": b64_data,
-                        "alt_text": alt_text
-                    }
-                }
-                
-                # Save to JSON file
+        if "article_data" not in st.session_state:
+            st.session_state.article_data = {}
+        st.session_state.article_data["processed_article"] = parsed
+        
+        # Together AI image generation (supplementary image)
+        if "article_data" not in st.session_state or "image" not in st.session_state.article_data:
+            parsed_for_image = parse_article(st.session_state.article)
+            image_prompt = parsed_for_image.get("image_prompt")
+            alt_text = parsed_for_image.get("image_alt")
+            if image_prompt:
+                image_prompt_english = re.sub(r'[\u0E00-\u0E7F]+', '', image_prompt).strip()
+                if not image_prompt_english:
+                    image_prompt_english = "A high-quality digital artwork of cryptocurrency news"
+            else:
+                image_prompt_english = None
+            if image_prompt_english:
+                st.info("Generating supplementary image from Together AI using English prompt...")
+                together_client = Together()
                 try:
-                    with open("generated_articles.json", "w", encoding="utf-8") as f:
-                        json.dump(article_data, f, ensure_ascii=False, indent=4)
-                    st.success("Article data saved to generated_articles.json")
+                    response = together_client.images.generate(
+                        prompt=image_prompt_english,
+                        model="black-forest-labs/FLUX.1-schnell-free",
+                        width=1200,
+                        height=800,
+                        steps=4,
+                        n=1,
+                        response_format="b64_json"
+                    )
+                    if response and response.data and len(response.data) > 0:
+                        b64_data = response.data[0].b64_json
+                        if not alt_text:
+                            primary_kw = keywords_input.splitlines()[0] if keywords_input.splitlines() else "Crypto"
+                            alt_text = f"Featured image related to {primary_kw}"
+                        st.image("data:image/png;base64," + b64_data, caption=alt_text)
+                        if "article_data" not in st.session_state:
+                            st.session_state.article_data = {}
+                        st.session_state.article_data["image"] = {"b64_data": b64_data, "alt_text": alt_text, "media_id": None}
+                    else:
+                        st.error("Failed to generate supplementary image from Together AI.")
                 except Exception as e:
-                    st.error(f"Error saving to JSON: {str(e)}")
-
-def run_app():
-    main()
+                    st.error(f"Error generating supplementary image: {str(e)}")
+            else:
+                st.info("No valid image prompt found in generated article for supplementary image.")
+        else:
+            st.info("Using previously generated image.")
+        
+        if st.button("Upload Article to WordPress"):
+            if not all([wp_url, wp_username, wp_app_password]):
+                st.error("Please provide all WordPress credentials.")
+            else:
+                try:
+                    # First, handle supplementary image upload if present
+                    media_info = None
+                    if "article_data" in st.session_state and "image" in st.session_state.article_data:
+                        image_data = st.session_state.article_data["image"]
+                        if image_data.get("b64_data"):
+                            article_json = json.loads(st.session_state.article)
+                            alt_text = article_json['seo']['altText']
+                            media_info = upload_image_to_wordpress(
+                                image_data["b64_data"],
+                                wp_url,
+                                wp_username,
+                                wp_app_password,
+                                filename="generated_image.png",
+                                alt_text=alt_text
+                            )
+                    # Prepare final article data
+                    article_data = {
+                        "main_title": parsed.get("main_title", "No Title"),
+                        "main_content": markdown.markdown(parsed.get("main_content", "")),
+                        "seo_slug": parsed.get("seo_slug", ""),
+                        "excerpt": parsed.get("excerpt", ""),
+                        "yoast_title": parsed.get("yoast_title", ""),
+                        "yoast_metadesc": parsed.get("yoast_metadesc", ""),
+                        "image": st.session_state.article_data.get("image") if ("image" in st.session_state.article_data) else {}
+                    }
+                    if media_info and "media_id" in media_info:
+                        article_data["image"]["media_id"] = media_info["media_id"]
+                    primary_keyword_upload = keywords_input.splitlines()[0] if keywords_input.strip() else ""
+                    submit_article_to_wordpress(article_data, wp_url, wp_username, wp_app_password, primary_keyword=primary_keyword_upload)
+                except Exception as e:
+                    st.error(f"Error during upload process: {str(e)}")
 
 if __name__ == "__main__":
-    run_app()
+    main()
