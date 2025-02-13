@@ -180,7 +180,7 @@ Secondary Keywords: {', '.join(keyword_list[1:]) if len(keyword_list) > 1 else '
         
         # Build the prompt
         prompt = f"""
-Write a comprehensive and in-depth Thai crypto news article for WordPress. {angle_instruction}
+Write a comprehensive and in-depth Thai crypto news article for WordPress. Align to {angle_instruction} if provided.
 Ensure the entire article is written in Thai, except that all technical terms and proper names (including names of people, places, organizations, platforms, coin names, etc.) must remain in English.
 Make the narrative natural and engaging. All explanations, analysis, and commentary should be in Thai.
 Follow these guidelines:
@@ -191,36 +191,18 @@ Follow these guidelines:
   2. Create curiosity gaps and bold statements.
 - Include concise source attributions only once in the introduction. {attribution_instruction}
 - For monetary values, remove any "$" symbols and append "ดอลลาร์" with proper spacing.
-- Create exactly {section_count} distinct H2 sections; for each section provide 3-4 paragraphs of in-depth explanation.
+- Create exactly {section_count} distinct and engagingH2 sections; for each section provide 3-4 paragraphs of in-depth explanation.
 - At the end, include an Excerpt for WordPress (1 sentence in Thai) and an Image Prompt.
 - The Image Prompt must be in English only. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
+- Always escapes special characters to avoid Streamlit rendering issues. 
 
-Now, generate the article with the following structure:
-1. SEO Elements
-1.1 Title Options (include {primary_keyword} once, maintain original form):
-   - [Option 1: News-focused title]
-   - [Option 2: Number-focused title]
-   - [Option 3: Question-based title]
-
-1.2 Meta Description Options (include {primary_keyword} once):
-   - [Option 1: News angle + key benefit]
-   - [Option 2: Number-focused]
-   - [Option 3: Question to stimulate curiosity]
-
-1.3 H1 Options (aligned with Title and Meta Description including {primary_keyword}):
-   - [Option 1: Direct news statement]
-   - [Option 2: Number-focused statement]
-   - [Option 3: Engaging question]
-2. Main Content with {section_count} H2 sections
-3. Excerpt for WordPress
-4. Image Prompt (in English only)
-## Additional Elements
-Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
-- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
-- Excerpt for WordPress: One sentence in Thai that briefly describes the article
-
-You must ensure to render Markdown properly as this generated article will be used in Streamlit UI.
-Always escapes special characters to avoid Streamlit rendering issues. 
+Now, generate markdown article with the following structure:
+[Title includes {primary_keyword}, ensure it's engaging and is new-like headline.]
+[Meta Description includes {primary_keyword}, ensure it's click-worthy and stimulates curiosity]
+[Main Content in {section_count} sections]
+[Slug URL in English includes {primary_keyword}, translate Thai keywords to English]
+[Image ALT Text in Thai includes {primary_keyword}. Keep technical terms and entity names in English, rest in Thai]
+[Image Prompt]
 Here are the transcripts to base the article on:
 """
         for transcript_item in transcripts:
@@ -285,11 +267,11 @@ def X_field(field_name):
 def main():
     # Initialize session state for input fields if not exists
     if 'keywords' not in st.session_state:
-        st.session_state.keywords = "Bitcoin\nBTC"
+        st.session_state.keywords = ""
     if 'yt_url1' not in st.session_state:
-        st.session_state.yt_url1 = "https://www.youtube.com/watch?v=Go1ugz-y4as"
+        st.session_state.yt_url1 = ""
     if 'channel1' not in st.session_state:
-        st.session_state.channel1 = "InvestAnswers"
+        st.session_state.channel1 = ""
     if 'yt_url2' not in st.session_state:
         st.session_state.yt_url2 = ""
     if 'channel2' not in st.session_state:
@@ -301,7 +283,7 @@ def main():
     if 'text_content' not in st.session_state:
         st.session_state.text_content = ""
     if 'angle' not in st.session_state:
-        st.session_state.angle = "Bitcoin Onchain Data Analysis"
+        st.session_state.angle = ""
     if 'transcripts' not in st.session_state:
         st.session_state.transcripts = []
     if 'article' not in st.session_state:
