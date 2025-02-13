@@ -2,7 +2,7 @@ import os
 import re
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 import streamlit as st
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -193,14 +193,32 @@ Follow these guidelines:
 - Create exactly {section_count} distinct H2 sections; for each section provide 3-4 paragraphs of in-depth explanation.
 - At the end, include an Excerpt for WordPress (1 sentence in Thai) and an Image Prompt.
 - The Image Prompt must be in English. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
-- SEO Title, Meta Description, H1 must be engaging and click-worthy (use news-like sentences). The length for each element should adhere to SEO best practices.
-  
+
 Now, generate the article with the following structure:
-1. Title, Meta Description and H1 (include the primary keyword once for each element). 
-2. Main Content with {section_count} H2 sections. 
+1. SEO Elements
+1.1 Title Options (include {primary_keyword} once, maintain original form):
+   - [Option 1: News-focused title]
+   - [Option 2: Number-focused title]
+   - [Option 3: Question-based title]
+
+1.2 Meta Description Options (include {primary_keyword} once):
+   - [Option 1: News angle + key benefit]
+   - [Option 2: Number-focused]
+   - [Option 3: Question to stimulate curiosity]
+
+1.3 H1 Options (aligned with Title and Meta Description including {primary_keyword}):
+   - [Option 1: Direct news statement]
+   - [Option 2: Number-focused statement]
+   - [Option 3: Engaging question]
+2. Main Content with {section_count} H2 sections
 3. Excerpt for WordPress
 4. Image Prompt (in English only)
+## Additional Elements
+Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
+- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
+- Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
+Do not use raw Markdown. You must ensure to render Markdown properly as this generated article will be used in Streamlit UI. 
 Here are the transcripts to base the article on:
 """
         for transcript_item in transcripts:
@@ -240,12 +258,16 @@ Here are the transcripts to base the article on:
         return None
 
 def extract_image_prompt(article_text):
-    """Extract the Image Prompt from the generated article using the marker 'Image Prompt:'"""
-    pattern = r"(?i)Image Prompt.*?\n(.*)"
-    match = re.search(pattern, article_text, re.DOTALL)
+    """Extract the Image Prompt from the generated article using a more robust pattern."""
+    # This pattern looks for a line starting with "Image Prompt:" (case-insensitive)
+    pattern = r"(?i)^Image Prompt\s*[:\-]\s*(.*)$"
+    match = re.search(pattern, article_text, re.MULTILINE)
     if match:
-        return match.group(1).strip()
-    return None
+        prompt = match.group(1).strip()
+        if prompt:
+            return prompt
+    # Fallback default prompt if none is found
+    return "A futuristic digital scene depicting cryptocurrency market trends with vibrant colors and dynamic motion."
 
 def extract_alt_text(article_text):
     """Extract the Image ALT text from the generated article using the marker 'Image ALT Text:'"""
@@ -383,12 +405,16 @@ def main():
 
             if st.session_state.article:
                 st.subheader("Meta Description")
-                st.markdown(st.session_state.article, unsafe_allow_html=True)
+                cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
+                cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
+                cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)
+                st.markdown(cleaned_article)
                 st.download_button(label="Download Article", data=st.session_state.article, file_name="generated_article.txt", mime="text/plain", use_container_width=True)
                 
                 # Together AI Image Generation
                 image_prompt = extract_image_prompt(st.session_state.article)
                 alt_text = extract_alt_text(st.session_state.article)
+                st.write("Extracted Image Prompt:", image_prompt)  # Debug output to verify prompt extraction
                 if image_prompt:
                     st.info("Generating image from Together AI...")
                     together_client = Together()
@@ -402,6 +428,7 @@ def main():
                             n=1,
                             response_format="b64_json"
                         )
+                        st.write("Together API Response:", response)  # Debug output to inspect API response
                         if response and response.data and len(response.data) > 0:
                             b64_data = response.data[0].b64_json
                             st.image("data:image/png;base64," + b64_data, caption=alt_text or "Generated image")
