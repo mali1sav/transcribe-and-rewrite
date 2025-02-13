@@ -9,6 +9,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from openai import OpenAI
 from together import Together  # For image generation
+import markdown  # Added to convert markdown to HTML
 
 # Load environment variables
 load_dotenv()
@@ -192,7 +193,7 @@ Follow these guidelines:
 - For monetary values, remove any "$" symbols and append "ดอลลาร์" with proper spacing.
 - Create exactly {section_count} distinct H2 sections; for each section provide 3-4 paragraphs of in-depth explanation.
 - At the end, include an Excerpt for WordPress (1 sentence in Thai) and an Image Prompt.
-- The Image Prompt must be in English. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
+- The Image Prompt must be in English only. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
 
 Now, generate the article with the following structure:
 1. SEO Elements
@@ -218,7 +219,8 @@ Slug URL in English (must include {primary_keyword}; translate Thai keywords to 
 - Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
-Do not use raw Markdown. You must ensure to render Markdown properly as this generated article will be used in Streamlit UI. 
+You must ensure to render Markdown properly as this generated article will be used in Streamlit UI.
+Always escapes special characters to avoid Streamlit rendering issues. 
 Here are the transcripts to base the article on:
 """
         for transcript_item in transcripts:
@@ -404,12 +406,62 @@ def main():
                 st.session_state.generating = False
 
             if st.session_state.article:
-                st.subheader("Meta Description")
-                cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
-                cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
-                cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)
-                st.markdown(cleaned_article)
-                st.download_button(label="Download Article", data=st.session_state.article, file_name="generated_article.txt", mime="text/plain", use_container_width=True)
+                # Convert the generated markdown article to HTML for fully rendered output
+                html_article = markdown.markdown(st.session_state.article)
+                
+                # Add custom CSS for styling the rendered HTML
+                st.markdown("""
+                    <style>
+                    .markdown-content {
+                        padding: 1rem;
+                        background: white;
+                        border-radius: 5px;
+                    }
+                    .markdown-content h1 { 
+                        font-size: 2em;
+                        margin: 1.2em 0 0.6em 0;
+                        color: #1e1e1e;
+                    }
+                    .markdown-content h2 { 
+                        font-size: 1.5em;
+                        margin: 1em 0 0.5em 0;
+                        color: #2c2c2c;
+                        border-bottom: 1px solid #eee;
+                        padding-bottom: 0.3em;
+                    }
+                    .markdown-content h3 { 
+                        font-size: 1.2em;
+                        margin: 0.8em 0 0.4em 0;
+                        color: #3c3c3c;
+                    }
+                    .markdown-content p { 
+                        margin: 0 0 1em 0;
+                        line-height: 1.6;
+                    }
+                    .markdown-content ul { 
+                        margin: 0 0 1em 0;
+                        padding-left: 2em;
+                    }
+                    .markdown-content li { 
+                        margin: 0.5em 0;
+                        line-height: 1.4;
+                    }
+                    .markdown-content a {
+                        color: #0366d6;
+                        text-decoration: none;
+                    }
+                    .markdown-content a:hover {
+                        text-decoration: underline;
+                    }
+                    </style>
+                """, unsafe_allow_html=True)
+                
+                # Create a container with the custom CSS class and render the HTML article
+                with st.container():
+                    st.markdown('<div class="markdown-content">' + html_article + '</div>', unsafe_allow_html=True)
+                
+                # Download button now provides the fully rendered HTML version
+                st.download_button(label="Download Article (HTML)", data=html_article, file_name="generated_article.html", mime="text/html", use_container_width=True)
                 
                 # Together AI Image Generation
                 image_prompt = extract_image_prompt(st.session_state.article)
