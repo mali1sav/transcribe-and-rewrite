@@ -94,31 +94,55 @@ def extract_with_firecrawl(url):
             
         app = FirecrawlApp(api_key=api_key)
         
-        # Define extraction schema
-        class NestedModel1(BaseModel):
-            title: str
-            author: str = None
-            published_date: str = None
-            content: str
-
-        class ExtractSchema(BaseModel):
-            article: NestedModel1
-            
-        data = app.extract([url], {
-            'prompt': 'Extract the article title, author, published date, and content. Ensure the title and content are always included.',
-            'schema': ExtractSchema.model_json_schema(),
+        # Use only supported parameters for v1 API
+        response = app.scrape_url(url=url, params={
+            'formats': ['markdown']
         })
         
-        if data and data.get('success') and data.get('data'):
-            article = data['data'].get('article')
-            if article:
-                return {
-                    'title': article.get('title'),
-                    'author': article.get('author'),
-                    'published_date': article.get('published_date'),
-                    'text': article.get('content')
-                }
+        # Debug output in expander
+        with st.expander("Debug: Firecrawl Response", expanded=False):
+            st.write("Raw response:", response)
         
+        if response and isinstance(response, dict):
+            # Get metadata
+            metadata = response.get('metadata', {})
+            
+            # Get content, trying different possible fields
+            content = response.get('markdown', '')
+            if not content:
+                content = response.get('content', '')
+            if not content:
+                content = response.get('text', '')
+            
+            if content:
+                # Clean up the content by removing navigation-like patterns
+                lines = [line for line in content.split('\n') 
+                        if not any(pattern in line.lower() 
+                                 for pattern in ['menu', 'navigation', '- [', 'search', 'login', 'sign up'])]
+                cleaned_content = '\n'.join(lines).strip()
+                
+                if cleaned_content:
+                    # Get title from metadata
+                    title = (metadata.get('ogTitle') or 
+                            metadata.get('title') or 
+                            metadata.get('parsely-title') or
+                            'Extracted Content')
+                    
+                    # Clean up the title if it contains the site name
+                    if ' | ' in title:
+                        title = title.split(' | ')[0]
+                    elif ' - ' in title:
+                        title = title.split(' - ')[0]
+                    
+                    return {
+                        'title': title,
+                        'author': (metadata.get('parsely-author') or 
+                                 metadata.get('author')),
+                        'published_date': (metadata.get('publishedTime') or 
+                                         metadata.get('parsely-pub-date')),
+                        'text': cleaned_content
+                    }
+            
         st.warning("Firecrawl could not extract content")
         return None
             
@@ -362,7 +386,18 @@ News Angle: {news_angle or ""}
 * Maintain focus throughout the article - avoid tangents or unrelated information
 
 # Source Citation Rules:
-* CRITICAL: Include concise attributions to each source only ONCE in the entire article, and be embedded in the intro section's sentence in a natural, contextual manner, using markdown hyperlinks like this [Source domain name](url)
+* CRITICAL: Each source must be cited EXACTLY ONCE in the FIRST PARAGRAPH ONLY
+* Citations must follow this exact format: [Source domain name](url)
+* All facts and information from a source must be attributed in a single citation
+* DO NOT repeat source citations in later paragraphs or sections
+* If you need to reference information from a previously cited source, simply state the facts without re-citing
+* Example of correct citation format:
+  ✅ "According to [BBC News](url), Event A occurred, while [Reuters](url) reported Event B, and [Bloomberg](url) noted Event C. These developments suggest..."
+* Examples of incorrect citation formats:
+  ❌ Multiple citations of same source: "BBC News reports... Later, BBC News stated..."
+  ❌ Citations outside first paragraph: "In a related development, BBC News reported..."
+  ❌ Separate citations for related facts: "[BBC News](url) reported X. Later in the story, [BBC News](url) mentioned Y."
+* IMPORTANT: Group ALL facts from each source into a SINGLE citation in the first paragraph
 
 # Main Content (also applicable to H1,H2, Title, and Meta Description) Guidelines:
 * Keep the following terms in English, rest in Thai:
@@ -410,7 +445,7 @@ News Angle: {news_angle or ""}
 
 [Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
 
-[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. Do not repeat the same source attribution more than once in the entire article.
+[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. 
 ]
 
 [Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
