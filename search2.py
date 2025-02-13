@@ -15,6 +15,9 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 import google.generativeai as genai
 from together import Together
+from slugify import slugify
+
+
 
 load_dotenv()
 
@@ -30,10 +33,10 @@ def escape_special_chars(text):
         text = text.replace(char, '\\' + char)
     return text
 
-def generate_slug(text):
-    """Generate a URL-friendly slug from text."""
-    text = re.sub(r'[^\w\s-]', '', text.lower())
-    return re.sub(r'[-\s]+', '-', text).strip('-_')
+
+def generate_slug_custom(text):
+    """Generate a sanitized slug using python-slugify."""
+    return slugify(text, lowercase=True, max_length=200, word_boundary=True)
 
 def construct_endpoint(wp_url, endpoint_path):
     """Construct the WordPress endpoint."""
@@ -95,7 +98,8 @@ def parse_article(article_json):
             "main_title": article['title'],
             "main_content": "\n\n".join(content_parts),
             "yoast_title": article['seo']['metaTitle'],
-            "yoast_metadesc": article['seo']['metaDescription'],
+            "yoast_metadesc": article['seo']['metaDescription'] if len(article['seo']['metaDescription']) <= 160 
+                              else article['seo']['metaDescription'][:157] + "...",
             "seo_slug": article['seo']['slug'],
             "excerpt": article['seo']['excerpt'],
             "image_prompt": article['seo']['imagePrompt'],
@@ -111,8 +115,8 @@ def parse_article(article_json):
 
 def upload_image_to_wordpress(b64_data, wp_url, username, wp_app_password, filename="generated_image.png", alt_text="Generated Image"):
     """
-    Uploads an image (provided as a base64 string) to WordPress.
-    Returns a dictionary with keys 'media_id' and 'source_url'.
+    Uploads an image (base64 string) to WordPress via the REST API.
+    Returns a dict with 'media_id' and 'source_url'.
     """
     try:
         image_bytes = base64.b64decode(b64_data)
@@ -132,10 +136,10 @@ def upload_image_to_wordpress(b64_data, wp_url, username, wp_app_password, filen
             media_id = media_data.get('id')
             source_url = media_data.get('source_url', '')
             st.write(f"[Upload] Received Media ID: {media_id}")
-            # Update media with alt text
+            # Update alt text via PATCH (or PUT)
             update_endpoint = f"{media_endpoint}/{media_id}"
             update_data = {'alt_text': alt_text, 'title': alt_text}
-            update_response = requests.put(update_endpoint, json=update_data, auth=HTTPBasicAuth(username, wp_app_password))
+            update_response = requests.patch(update_endpoint, json=update_data, auth=HTTPBasicAuth(username, wp_app_password))
             st.write(f"[Upload] Update response status: {update_response.status_code}")
             if update_response.status_code in (200, 201):
                 st.success(f"[Upload] Image uploaded and alt text updated. Media ID: {media_id}")
@@ -153,25 +157,27 @@ def upload_image_to_wordpress(b64_data, wp_url, username, wp_app_password, filen
 def submit_article_to_wordpress(article, wp_url, username, wp_app_password, primary_keyword=""):
     """
     Submits the article to WordPress using the WP REST API.
+    Sets Yoast SEO meta fields and auto-selects the featured image.
     """
     endpoint = construct_endpoint(wp_url, "/wp-json/wp/v2/posts")
     st.write("Submitting article with Yoast SEO fields...")
     st.write("Yoast Title:", article.get("yoast_title"))
     st.write("Yoast Meta Description:", article.get("yoast_metadesc"))
+    
     data = {
-        "title": article.get("main_title", "Untitled"),
+        "title": article.get("main_title", ""),
         "content": article.get("main_content", ""),
-        "slug": article.get("seo_slug") or generate_slug(article.get("main_title", "")),
-        "excerpt": article.get("excerpt", ""),
+        "slug": article.get("seo_slug", ""),
         "status": "draft",
         "meta_input": {
             "_yoast_wpseo_title": article.get("yoast_title", ""),
             "_yoast_wpseo_metadesc": article.get("yoast_metadesc", ""),
-            "_yoast_wpseo_focuskw": primary_keyword,
-            "_yoast_wpseo_title_val": article.get("yoast_title", ""),
-            "_yoast_wpseo_metadesc_val": article.get("yoast_metadesc", "")
+            "_yoast_wpseo_focuskw": primary_keyword
         }
     }
+
+    if "image" in article and isinstance(article["image"], dict) and article["image"].get("media_id"):
+        data["featured_media"] = article["image"]["media_id"]
     keyword_to_cat_tag = {"Dogecoin": 527, "Bitcoin": 7}
     if primary_keyword in keyword_to_cat_tag:
         cat_tag_id = keyword_to_cat_tag[primary_keyword]
@@ -192,13 +198,13 @@ def submit_article_to_wordpress(article, wp_url, username, wp_app_password, prim
         return None
 
 # ------------------------------
-# Jina-Based Extraction (Main Source)
+# Jina-Based Fallback Extraction (Using Jina API)
 # ------------------------------
 
 def jina_extract_via_r(url: str) -> dict:
     """
-    Uses the Jina REST API endpoint to extract content.
-    Returns extracted markdown content along with title and minimal SEO fields.
+    Uses the Jina REST API endpoint (https://r.jina.ai/) to extract LLM-ready text.
+    This appends the URL to the Jina base URL and returns the extracted markdown content along with minimal SEO fields.
     """
     JINA_BASE_URL = "https://r.jina.ai/"
     full_url = JINA_BASE_URL + url
@@ -210,6 +216,7 @@ def jina_extract_via_r(url: str) -> dict:
                 "seo": {"slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""}}
     if r.status_code == 200:
         text = r.text
+        # Assume the API returns LLM-ready text with a clear "Markdown Content:" section.
         md_index = text.find("Markdown Content:")
         md_content = text[md_index + len("Markdown Content:"):].strip() if md_index != -1 else text.strip()
         title_match = re.search(r"Title:\s*(.*)", text)
@@ -218,11 +225,11 @@ def jina_extract_via_r(url: str) -> dict:
             "title": title,
             "content": {"intro": md_content, "sections": [], "conclusion": ""},
             "seo": {
-                "slug": generate_slug(title),
+                "slug": generate_slug_custom(title),
                 "metaTitle": title,
                 "metaDescription": title,
                 "excerpt": title,
-                "imagePrompt": "",  # To be set if desired
+                "imagePrompt": "",  # You may choose to set this separately
                 "altText": ""
             }
         }
@@ -234,14 +241,14 @@ def jina_extract_via_r(url: str) -> dict:
 
 def extract_url_content(gemini_client, url, messages_placeholder):
     """
-    Extracts article content from a URL using Jina as the main source.
+    Extracts article content from a URL using the Jina REST API as the primary fallback.
     """
     with messages_placeholder:
-        st.info(f"Extracting content from {url} using Jina...")
+        st.info(f"Extracting content from {url} using Jina REST API...")
     fallback_data = jina_extract_via_r(url)
     with st.expander("Debug: Jina Extraction", expanded=False):
         st.write("Jina extracted JSON:", fallback_data)
-    content_text = fallback_data.get("content", {}).get("intro", "") or ""
+    content_text = fallback_data.get("content", {}).get("intro", "")
     with st.expander("Debug: Jina Extracted Content", expanded=False):
         st.write("Extracted content:", content_text)
     return {
@@ -334,7 +341,7 @@ def make_gemini_request(client, prompt):
                             "title": title,
                             "content": {"intro": cleaned_text, "sections": [], "conclusion": ""},
                             "seo": {
-                                "slug": generate_slug(title),
+                                "slug": generate_slug_custom(title),
                                 "metaTitle": title,
                                 "metaDescription": title,
                                 "excerpt": title,
@@ -363,7 +370,7 @@ def make_gemini_request(client, prompt):
 def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
     """
     Generates a comprehensive news article in Thai using the Gemini API.
-    Uses the extracted source content from Jina verbatim in the prompt.
+    Uses the extracted source content (via Jina) in the prompt.
     Returns a JSON-structured article following the Article schema.
     """
     try:
@@ -373,7 +380,7 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         primary_keyword = keyword_list[0] if keyword_list else ""
         secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
         
-        # Concatenate source content from all transcripts with clear delimiters.
+        # Concatenate source content from transcripts with clear delimiters.
         source_texts = ""
         seen_sources = set()
         for t in transcripts:
@@ -381,11 +388,10 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
             source = t.get('source', 'Unknown')
             if source not in seen_sources:
                 seen_sources.add(source)
-                source_texts += f"\n---\nSource: {source}\nURL: {t.get('url', '')}\n\n{content}\n---\n"
+                source_texts += f"\n---\nSource: {source}\nURL: {t.get('url', '')}\n\n{escape_special_chars(content)}\n---\n"
             else:
-                source_texts += f"\n{content}\n"
+                source_texts += f"\n{escape_special_chars(content)}\n"
         
-        # Construct the Gemini prompt with strict instructions.
         prompt = f"""
 You are an expert Thai crypto journalist. Using ONLY the exact source content provided below, craft a news article in Thai. DO NOT invent or modify any factual details. Your article must faithfully reflect the provided source text.
 
@@ -399,10 +405,10 @@ Structure your output as valid JSON with the following keys:
    - intro: An introduction paragraph in Thai that naturally embeds one concise attribution in the format [Source Name](Source URL). Include each source only once.
    - sections: An array of exactly {section_count} objects, each with:
          - heading: An H2 heading in Thai using power words.
-         - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content. For each section, if multiple image markdown links appear, include only the first one. Do not include any featured images.
+         - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content.
    - conclusion: A concluding paragraph summarizing the article.
 - sources: An array of objects with keys "domain" and "url" for each source (each included only once).
-- seo: An object with keys "slug", "metaTitle", "metaDescription", "excerpt", "imagePrompt", "altText". In the title, metaTitle, and metaDescription, ensure the primary keyword appears exactly once.
+- seo: An object with keys "slug", "metaTitle", "metaDescription", "excerpt", "imagePrompt", "altText". Ensure the primary keyword appears exactly once in title, metaTitle, and metaDescription.
 
 IMPORTANT: DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
 
@@ -420,46 +426,6 @@ Return ONLY valid JSON, no additional commentary.
         return None
 
 # ------------------------------
-# Image Processing Function
-# ------------------------------
-
-def process_article_images(article_text, wp_url, wp_username, wp_app_password):
-    """
-    Finds markdown image links in article_text (ignoring those with 'featured' in alt text),
-    downloads each image, uploads it to WordPress, and replaces the markdown with a full <img> tag
-    using the returned source URL.
-    """
-    pattern = r'!\[([^\]]+)\]\(([^)]+)\)'
-    matches = re.findall(pattern, article_text)
-    st.write("DEBUG: Found image markdown matches:", matches)
-    for alt, url in matches:
-        if "featured" in alt.lower():
-            continue  # Skip featured images
-        st.write(f"DEBUG: Processing image: alt='{alt}', url='{url}'")
-        try:
-            img_response = requests.get(url)
-            if img_response.status_code == 200:
-                b64_data = base64.b64encode(img_response.content).decode('utf-8')
-                # Print WP credentials (masked)
-                st.write(f"DEBUG: WP credentials - URL: {wp_url}, Username: {wp_username}, App Password: {wp_app_password[:3]}***")
-                upload_result = upload_image_to_wordpress(b64_data, wp_url, wp_username, wp_app_password)
-                if upload_result and "media_id" in upload_result and "source_url" in upload_result:
-                    media_id = upload_result["media_id"]
-                    source_url = upload_result["source_url"]
-                    # Construct a full image tag with the WP source URL
-                    new_img_tag = f'<img class="alignnone wp-image-{media_id}" src="{source_url}" alt="{alt}" />'
-                    st.write(f"DEBUG: Replacing image markdown with: {new_img_tag}")
-                    # Replace the markdown with the full image tag
-                    article_text = article_text.replace(f"![{alt}]({url})", new_img_tag)
-                else:
-                    st.error(f"DEBUG: Media upload failed for image {url}")
-            else:
-                st.error(f"DEBUG: Failed to download image {url}: Status code {img_response.status_code}")
-        except Exception as e:
-            st.error(f"DEBUG: Exception processing image {url}: {e}")
-    return article_text
-
-# ------------------------------
 # Main App Function
 # ------------------------------
 
@@ -469,7 +435,7 @@ def main():
     # Default values:
     default_url = "https://cointelegraph.com/news/bitcoin-traders-say-400-k-btc-price-possible-3-key-events-occur"
     default_keyword = "Bitcoin"
-    default_news_angle = "Bitcoin traders say $400K BTC price is possible if 3 key events occurs"
+    default_news_angle = "Bitcoin traders say $400K BTC price is possible if 3 key events occur"
     
     gemini_client = init_gemini_client()
     if not gemini_client:
@@ -535,18 +501,17 @@ def main():
             st.error(f"Invalid JSON format: {str(e)}")
             st.text_area("Raw Content", value=st.session_state.article, height=300)
         
-        # Process images: download images from markdown and upload to WP
-        parsed = parse_article(st.session_state.article)
-        if parsed.get("main_content"):
-            processed_content = process_article_images(parsed["main_content"], wp_url, wp_username, wp_app_password)
-            parsed["main_content"] = processed_content
-        
+        # Process images in the article content (if any markdown images exist)
         if "article_data" not in st.session_state:
             st.session_state.article_data = {}
-        st.session_state.article_data["processed_article"] = parsed
+        if "processed_article" not in st.session_state.article_data:
+            # Here you would call a function (not shown) to process markdown image links and upload them to WP.
+            # For now, we simply store the parsed article.
+            parsed = parse_article(st.session_state.article)
+            st.session_state.article_data["processed_article"] = parsed
         
-        # Together AI image generation (supplementary image)
-        if "article_data" not in st.session_state or "image" not in st.session_state.article_data:
+        # Supplementary image generation via Together AI
+        if "image" not in st.session_state.article_data:
             parsed_for_image = parse_article(st.session_state.article)
             image_prompt = parsed_for_image.get("image_prompt")
             alt_text = parsed_for_image.get("image_alt")
@@ -575,8 +540,6 @@ def main():
                             primary_kw = keywords_input.splitlines()[0] if keywords_input.splitlines() else "Crypto"
                             alt_text = f"Featured image related to {primary_kw}"
                         st.image("data:image/png;base64," + b64_data, caption=alt_text)
-                        if "article_data" not in st.session_state:
-                            st.session_state.article_data = {}
                         st.session_state.article_data["image"] = {"b64_data": b64_data, "alt_text": alt_text, "media_id": None}
                     else:
                         st.error("Failed to generate supplementary image from Together AI.")
@@ -592,9 +555,9 @@ def main():
                 st.error("Please provide all WordPress credentials.")
             else:
                 try:
-                    # First, handle supplementary image upload if present
+                    parsed = parse_article(st.session_state.article)
                     media_info = None
-                    if "article_data" in st.session_state and "image" in st.session_state.article_data:
+                    if "image" in st.session_state.article_data:
                         image_data = st.session_state.article_data["image"]
                         if image_data.get("b64_data"):
                             article_json = json.loads(st.session_state.article)
@@ -607,7 +570,6 @@ def main():
                                 filename="generated_image.png",
                                 alt_text=alt_text
                             )
-                    # Prepare final article data
                     article_data = {
                         "main_title": parsed.get("main_title", "No Title"),
                         "main_content": markdown.markdown(parsed.get("main_content", "")),
@@ -615,7 +577,7 @@ def main():
                         "excerpt": parsed.get("excerpt", ""),
                         "yoast_title": parsed.get("yoast_title", ""),
                         "yoast_metadesc": parsed.get("yoast_metadesc", ""),
-                        "image": st.session_state.article_data.get("image") if ("image" in st.session_state.article_data) else {}
+                        "image": st.session_state.article_data.get("image") if "image" in st.session_state.article_data else {}
                     }
                     if media_info and "media_id" in media_info:
                         article_data["image"]["media_id"] = media_info["media_id"]
