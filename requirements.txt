@@ -14,3 +14,4 @@ tenacity
 pydantic
 firecrawl
 markdown
+python-slugify
