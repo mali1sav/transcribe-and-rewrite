@@ -443,9 +443,9 @@ def main():
     st.set_page_config(page_title="Generate and Upload Article", layout="wide")
     
     # Default values:
-    default_url = "https://cointelegraph.com/news/bitcoin-traders-say-400-k-btc-price-possible-3-key-events-occur"
+    default_url = ""
     default_keyword = "Bitcoin"
-    default_news_angle = "Bitcoin traders say $400K BTC price is possible if 3 key events occur"
+    default_news_angle = ""
     
     gemini_client = init_gemini_client()
     if not gemini_client:
