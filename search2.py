@@ -17,8 +17,6 @@ import google.generativeai as genai
 from together import Together
 from slugify import slugify
 
-
-
 load_dotenv()
 
 # ------------------------------
@@ -32,7 +30,6 @@ def escape_special_chars(text):
     for char in chars_to_escape:
         text = text.replace(char, '\\' + char)
     return text
-
 
 def generate_slug_custom(text):
     """Generate a sanitized slug using python-slugify."""
@@ -98,7 +95,7 @@ def parse_article(article_json):
             "main_title": article['title'],
             "main_content": "\n\n".join(content_parts),
             "yoast_title": article['seo']['metaTitle'],
-            "yoast_metadesc": article['seo']['metaDescription'] if len(article['seo']['metaDescription']) <= 160 
+            "yoast_metadesc": article['seo']['metaDescription'] if len(article['seo']['metaDescription']) <= 160 \
                               else article['seo']['metaDescription'][:157] + "...",
             "seo_slug": article['seo']['slug'],
             "excerpt": article['seo']['excerpt'],
@@ -178,11 +175,14 @@ def submit_article_to_wordpress(article, wp_url, username, wp_app_password, prim
 
     if "image" in article and isinstance(article["image"], dict) and article["image"].get("media_id"):
         data["featured_media"] = article["image"]["media_id"]
+
+    # Example category/tag logic:
     keyword_to_cat_tag = {"Dogecoin": 527, "Bitcoin": 7}
     if primary_keyword in keyword_to_cat_tag:
         cat_tag_id = keyword_to_cat_tag[primary_keyword]
         data["categories"] = [cat_tag_id]
         data["tags"] = [cat_tag_id]
+
     try:
         response = requests.post(endpoint, json=data, auth=HTTPBasicAuth(username, wp_app_password))
         if response.status_code in (200, 201):
@@ -212,8 +212,13 @@ def jina_extract_via_r(url: str) -> dict:
         r = requests.get(full_url)
     except Exception as e:
         st.error(f"Jina request error: {e}")
-        return {"title": "Extracted Content", "content": {"intro": "", "sections": [], "conclusion": ""},
-                "seo": {"slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""}}
+        return {
+            "title": "Extracted Content", 
+            "content": {"intro": "", "sections": [], "conclusion": ""},
+            "seo": {
+                "slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""
+            }
+        }
     if r.status_code == 200:
         text = r.text
         # Assume the API returns LLM-ready text with a clear "Markdown Content:" section.
@@ -229,15 +234,20 @@ def jina_extract_via_r(url: str) -> dict:
                 "metaTitle": title,
                 "metaDescription": title,
                 "excerpt": title,
-                "imagePrompt": "",  # You may choose to set this separately
+                "imagePrompt": "",
                 "altText": ""
             }
         }
         return fallback_json
     else:
         st.error(f"Jina extraction failed with status code {r.status_code}")
-        return {"title": "Extracted Content", "content": {"intro": "", "sections": [], "conclusion": ""},
-                "seo": {"slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""}}
+        return {
+            "title": "Extracted Content", 
+            "content": {"intro": "", "sections": [], "conclusion": ""},
+            "seo": {
+                "slug": "", "metaTitle": "", "metaDescription": "", "excerpt": "", "imagePrompt": "", "altText": ""
+            }
+        }
 
 def extract_url_content(gemini_client, url, messages_placeholder):
     """
@@ -448,10 +458,39 @@ def main():
     news_angle = st.sidebar.text_input("News Angle:", value=default_news_angle)
     section_count = st.sidebar.slider("Number of sections:", 2, 8, 3)
     
-    st.sidebar.header("WordPress Credentials")
-    wp_url = st.sidebar.text_input("WordPress Site URL:", value=os.getenv("wp_url", ""))
-    wp_username = st.sidebar.text_input("WordPress Username:", value=os.getenv("wp_username", ""))
-    wp_app_password = st.sidebar.text_input("WordPress App Password:", type="password", value=os.getenv("wp_app_password", ""))
+    # ----------------------------
+    # Replaced WordPress Credentials Section
+    # ----------------------------
+    st.sidebar.header("Select WordPress Site to Upload")
+    sites = {
+        "ICOBENCH": {
+            "url": os.getenv("ICOBENCH_WP_URL"),
+            "username": os.getenv("ICOBENCH_WP_USERNAME"),
+            "password": os.getenv("ICOBENCH_WP_APP_PASSWORD")
+        },
+        "CRYPTONEWS": {
+            "url": os.getenv("CRYPTONEWS_WP_URL"),
+            "username": os.getenv("CRYPTONEWS_WP_USERNAME"),
+            "password": os.getenv("CRYPTONEWS_WP_APP_PASSWORD")
+        },
+        "BITCOINIST": {
+            "url": os.getenv("BITCOINIST_WP_URL"),
+            "username": os.getenv("BITCOINIST_WP_USERNAME"),
+            "password": os.getenv("BITCOINIST_WP_APP_PASSWORD")
+        },
+        "NEWSBTC": {
+            "url": os.getenv("NEWSBTC_WP_URL"),
+            "username": os.getenv("NEWSBTC_WP_USERNAME"),
+            "password": os.getenv("NEWSBTC_WP_APP_PASSWORD")
+        },
+    }
+    site_options = list(sites.keys())
+    selected_site = st.sidebar.selectbox("Choose a site:", site_options)
+    
+    wp_url = sites[selected_site]["url"]
+    wp_username = sites[selected_site]["username"]
+    wp_app_password = sites[selected_site]["password"]
+    # ----------------------------
     
     messages_placeholder = st.empty()
     
@@ -505,8 +544,6 @@ def main():
         if "article_data" not in st.session_state:
             st.session_state.article_data = {}
         if "processed_article" not in st.session_state.article_data:
-            # Here you would call a function (not shown) to process markdown image links and upload them to WP.
-            # For now, we simply store the parsed article.
             parsed = parse_article(st.session_state.article)
             st.session_state.article_data["processed_article"] = parsed
         
@@ -516,11 +553,13 @@ def main():
             image_prompt = parsed_for_image.get("image_prompt")
             alt_text = parsed_for_image.get("image_alt")
             if image_prompt:
+                # Remove Thai characters to pass a simpler English prompt to the image generator
                 image_prompt_english = re.sub(r'[\u0E00-\u0E7F]+', '', image_prompt).strip()
                 if not image_prompt_english:
                     image_prompt_english = "A high-quality digital artwork of cryptocurrency news"
             else:
                 image_prompt_english = None
+            
             if image_prompt_english:
                 st.info("Generating supplementary image from Together AI using English prompt...")
                 together_client = Together()
@@ -552,7 +591,7 @@ def main():
         
         if st.button("Upload Article to WordPress"):
             if not all([wp_url, wp_username, wp_app_password]):
-                st.error("Please provide all WordPress credentials.")
+                st.error("Please ensure your .env file has valid credentials for the selected site.")
             else:
                 try:
                     parsed = parse_article(st.session_state.article)
@@ -582,7 +621,13 @@ def main():
                     if media_info and "media_id" in media_info:
                         article_data["image"]["media_id"] = media_info["media_id"]
                     primary_keyword_upload = keywords_input.splitlines()[0] if keywords_input.strip() else ""
-                    submit_article_to_wordpress(article_data, wp_url, wp_username, wp_app_password, primary_keyword=primary_keyword_upload)
+                    submit_article_to_wordpress(
+                        article_data, 
+                        wp_url, 
+                        wp_username, 
+                        wp_app_password, 
+                        primary_keyword=primary_keyword_upload
+                    )
                 except Exception as e:
                     st.error(f"Error during upload process: {str(e)}")
 
