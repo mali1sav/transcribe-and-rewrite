@@ -157,6 +157,12 @@ def submit_article_to_wordpress(article, wp_url, username, wp_app_password, prim
     Submits the article to WordPress using the WP REST API.
     Sets Yoast SEO meta fields and auto-selects the featured image.
     """
+    # Deep normalization for article data
+    while isinstance(article, list) and len(article) > 0:
+        article = article[0]  # Unpack nested lists
+    if not isinstance(article, dict):
+        article = {}
+    
     endpoint = construct_endpoint(wp_url, "/wp-json/wp/v2/posts")
     st.write("Submitting article with Yoast SEO fields...")
     st.write("Yoast Title:", article.get("yoast_title"))
@@ -174,8 +180,14 @@ def submit_article_to_wordpress(article, wp_url, username, wp_app_password, prim
         }
     }
 
-    if "image" in article and isinstance(article["image"], dict) and article["image"].get("media_id"):
-        data["featured_media"] = article["image"]["media_id"]
+    if "image" in article:
+        # Normalize image data if it's a list
+        image_data = article["image"]
+        if isinstance(image_data, list) and len(image_data) > 0:
+            image_data = image_data[0]
+        
+        if isinstance(image_data, dict) and image_data.get("media_id"):
+            data["featured_media"] = image_data["media_id"]
 
     # Example category/tag logic:
     keyword_to_cat_tag = {"Dogecoin": 527, "Bitcoin": 7}
@@ -304,7 +316,17 @@ def clean_gemini_response(text):
 def validate_article_json(json_str):
     """Validate article JSON against schema and return cleaned data."""
     try:
+        # Parse JSON and ensure we have a dictionary
         data = json.loads(json_str)
+        if isinstance(data, list):
+            data = next((item for item in data if isinstance(item, dict)), {})
+        elif not isinstance(data, dict):
+            data = {}
+            
+        # Skip validation if we have an empty dictionary
+        if not data:
+            return {}
+            
         if not data.get('title'):
             raise ValueError("Missing required field: title")
         if not data.get('content'):
@@ -325,14 +347,12 @@ def validate_article_json(json_str):
                 raise ValueError(f"Missing required SEO field: {field}")
         return data
     except json.JSONDecodeError as e:
-        line_no = e.lineno
-        col_no = e.colno
-        st.error(f"Invalid JSON at line {line_no}, column {col_no}: {str(e)}")
+        st.error(f"Invalid JSON: {str(e)}")
         st.code(json_str, language="json")
-        raise
+        return {}
     except ValueError as e:
         st.error(f"Validation error: {str(e)}")
-        raise
+        return {}
 
 def make_gemini_request(client, prompt):
     """Make Gemini API request with retries and proper error handling.
@@ -383,6 +403,7 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
     Generates a comprehensive news article in Thai using the Gemini API.
     Uses the extracted source content (via Jina) in the prompt.
     Returns a JSON-structured article following the Article schema.
+    Always returns a dictionary, even if input is a list.
     """
     try:
         if not transcripts:
@@ -413,13 +434,20 @@ News Angle: {news_angle}
 Structure your output as valid JSON with the following keys:
 - title: A news-style title in Thai that includes the primary keyword exactly.
 - content: An object with:
-   - intro: An introduction paragraph in Thai that naturally embeds one concise attribution in the format [Source Name](Source URL). Include each source only once.
+   - intro: A compelling introduction paragraph in Thai that naturally embeds one concise attribution in the format [Source Name](Source URL). This intro will also serve as the meta description, so make it informative and engaging before transitioning into the main content.
    - sections: An array of exactly {section_count} objects, each with:
          - heading: An H2 heading in Thai using power words.
          - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content.
    - conclusion: A concluding paragraph summarizing the article.
 - sources: An array of objects with keys "domain" and "url" for each source (each included only once).
-- seo: An object with keys "slug", "metaTitle", "metaDescription", "excerpt", "imagePrompt", "altText". Ensure the primary keyword appears exactly once in title, metaTitle, and metaDescription.
+- seo: An object with keys:
+   - slug: English URL-friendly slug that MUST end with '-thailand'
+   - metaTitle: Thai title with primary keyword
+   - metaDescription: Use the same text as the intro paragraph
+   - excerpt: One Thai sentence summary
+   - imagePrompt: English photo description
+   - altText: Thai ALT text with English terms
+   Ensure the primary keyword appears exactly once in title, metaTitle, and metaDescription.
 
 IMPORTANT: DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
 
@@ -430,11 +458,18 @@ Return ONLY valid JSON, no additional commentary.
 """
         content = make_gemini_request(client, prompt)
         if not content:
-            return None
+            return {}
+            
+        # Force dict output format
+        if isinstance(content, list):
+            content = next((item for item in content if isinstance(item, dict)), {})
+        elif not isinstance(content, dict):
+            content = {}
+            
         return content
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
-        return None
+        return {}
 
 # ------------------------------
 # Main App Function
