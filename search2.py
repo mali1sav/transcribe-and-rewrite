@@ -398,7 +398,32 @@ def make_gemini_request(client, prompt):
         st.error(f"Error making Gemini request: {str(e)}")
         raise
 
-def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None):
+def load_promotional_content():
+    """Loads promotional content from text files in the 'pr' folder."""
+    import random
+    pr_folder = os.path.join(os.path.dirname(__file__), "pr")
+    if not os.path.isdir(pr_folder):
+        return ""
+    promo_files = [f for f in os.listdir(pr_folder) if f.endswith(".txt")]
+    if not promo_files:
+        return ""
+    promo_file = random.choice(promo_files)
+    promo_path = os.path.join(pr_folder, promo_file)
+    with open(promo_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+def clean_source_content(content):
+    """Clean source content by handling special characters and escape sequences"""
+    # Replace problematic escape sequences
+    content = content.replace('!\[', '![')  # Fix image markdown escapes
+    content = content.replace('\\[', '[')   # Fix link markdown escapes
+    content = content.replace('\\]', ']')   # Fix link markdown escapes
+    content = content.replace('\\(', '(')   # Fix parentheses escapes
+    content = content.replace('\\)', ')')   # Fix parentheses escapes
+    # Handle other special characters if needed
+    return content
+
+def generate_article(client, transcripts, keywords=None, news_angle=None, section_count=3, promotional_text=None, selected_site=None):
     """
     Generates a comprehensive news article in Thai using the Gemini API.
     Uses the extracted source content (via Jina) in the prompt.
@@ -416,13 +441,13 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         source_texts = ""
         seen_sources = set()
         for t in transcripts:
-            content = t.get('content') or ""
+            content = clean_source_content(t.get('content') or "")
             source = t.get('source', 'Unknown')
             if source not in seen_sources:
                 seen_sources.add(source)
-                source_texts += f"\n---\nSource: {source}\nURL: {t.get('url', '')}\n\n{escape_special_chars(content)}\n---\n"
+                source_texts += f"\n---\nSource: {source}\nURL: {t.get('url', '')}\n\n{content}\n---\n"
             else:
-                source_texts += f"\n{escape_special_chars(content)}\n"
+                source_texts += f"\n{content}\n"
         
         prompt = f"""
 You are an expert Thai crypto journalist. Using ONLY the exact source content provided below, craft a news article in Thai. DO NOT invent or modify any factual details. Your article must faithfully reflect the provided source text.
@@ -438,16 +463,26 @@ Structure your output as valid JSON with the following keys:
    - sections: An array of exactly {section_count} objects, each with:
          - heading: An H2 heading in Thai using power words.
          - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content.
-   - conclusion: A concluding paragraph summarizing the article.
+         {f'One section MUST seamlessly integrate this promotional content while maintaining natural flow and mentioning the primary keyword: {promotional_text}' if promotional_text else ''}
+   - conclusion: A concluding paragraph summarizing the key points of the article.
 - sources: An array of objects with keys "domain" and "url" for each source (each included only once).
 - seo: An object with keys:
-   - slug: English URL-friendly slug that MUST end with '-thailand'
+   - slug: English URL-friendly slug{' that MUST end with "-thailand"' if selected_site in ['BITCOINIST', 'NEWSBTC'] else ''}
    - metaTitle: Thai title with primary keyword
    - metaDescription: Use the same text as the intro paragraph
    - excerpt: One Thai sentence summary
    - imagePrompt: English photo description
    - altText: Thai ALT text with English terms
    Ensure the primary keyword appears exactly once in title, metaTitle, and metaDescription.
+
+IMPORTANT NOTES:
+1. If promotional content is provided:
+   - Choose the most contextually relevant position to insert it (beginning, middle, or end of the sections)
+   - Create a dedicated section with a natural heading that bridges the main topic and promotional content
+   - Weave in the primary keyword naturally within this section
+   - Ensure the promotional section reads like a natural part of the article's narrative
+2. The promotional section should maintain the same tone and style as the rest of the article
+3. DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
 
 IMPORTANT: DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
 
@@ -456,15 +491,29 @@ Below is the source content (in markdown) extracted from the articles:
 
 Return ONLY valid JSON, no additional commentary.
 """
-        content = make_gemini_request(client, prompt)
-        if not content:
+        st.write("Prompt being sent to Gemini API:")
+        st.code(prompt, language='python')
+        response = make_gemini_request(client, prompt)
+        if not response:
             return {}
-            
-        # Force dict output format
-        if isinstance(content, list):
-            content = next((item for item in content if isinstance(item, dict)), {})
-        elif not isinstance(content, dict):
-            content = {}
+        
+        # If response is already a dict, convert it to JSON string first
+        if isinstance(response, dict):
+            response = json.dumps(response)
+        
+        try:
+            # Try to parse the JSON response
+            content = json.loads(response)
+            # Force dict output format
+            if isinstance(content, list):
+                content = content[0] if content else {}
+            return content
+        except json.JSONDecodeError as e:
+            st.error(f"JSON parsing error: {str(e)}")
+            st.error("Raw response:")
+            st.code(response)
+            return {}
+
             
         return content
     except Exception as e:
@@ -490,9 +539,37 @@ def main():
     
     st.sidebar.header("Article Generation")
     urls_input = st.sidebar.text_area("Enter URLs (one per line) to extract content from:", value=default_url)
-    keywords_input = st.sidebar.text_area("Keywords (one per line):", value=default_keyword)
+    keywords_input = st.sidebar.text_area("Keywords (one per line):", value=default_keyword, height=100)
     news_angle = st.sidebar.text_input("News Angle:", value=default_news_angle)
     section_count = st.sidebar.slider("Number of sections:", 2, 8, 3)
+    
+    # Additional content text area
+    additional_content = st.sidebar.text_area(
+        "Additional Content",
+        placeholder="Paste any extra content here. It will be treated as an additional source.",
+        height=150
+    )
+    
+    # Promotional content selection
+    st.sidebar.header("Promotional Content")
+    pr_folder = os.path.join(os.path.dirname(__file__), "pr")
+    if os.path.isdir(pr_folder):
+        promo_files = [f for f in os.listdir(pr_folder) if f.endswith(".txt")]
+        if promo_files:
+            promo_files = ["None"] + promo_files
+            selected_promo = st.sidebar.selectbox("Select promotional content:", promo_files)
+            if selected_promo != "None":
+                promo_path = os.path.join(pr_folder, selected_promo)
+                with open(promo_path, "r", encoding="utf-8") as f:
+                    promotional_text = f.read().strip()
+            else:
+                promotional_text = None
+        else:
+            st.sidebar.warning("No promotional content files found in 'pr' folder")
+            promotional_text = None
+    else:
+        st.sidebar.warning("'pr' folder not found")
+        promotional_text = None
     
     # ----------------------------
     # Replaced WordPress Credentials Section
@@ -540,14 +617,29 @@ def main():
             extracted = extract_url_content(gemini_client, url, messages_placeholder)
             if extracted:
                 transcripts.append(extracted)
+        # Add additional content if provided
+        if additional_content.strip():
+            transcripts.append({
+                'content': additional_content.strip(),
+                'source': 'Additional Content',
+                'url': ''
+            })
+            
+        # Process keywords
+        keywords = [k.strip() for k in keywords_input.splitlines() if k.strip()]
+            
         if transcripts:
+            # Get selected site
+            selected_site = st.session_state.get('selected_site')
+            
             article_content = generate_article(
                 gemini_client,
                 transcripts,
-                keywords=keywords_input.splitlines(),
+                keywords=keywords,
                 news_angle=news_angle,
                 section_count=section_count,
-                promotional_text=None
+                promotional_text=promotional_text,
+                selected_site=selected_site
             )
             if article_content:
                 st.session_state.article = json.dumps(article_content, ensure_ascii=False, indent=2)
