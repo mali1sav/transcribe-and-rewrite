@@ -38,7 +38,8 @@ def generate_slug_custom(text):
 def construct_endpoint(wp_url, endpoint_path):
     """Construct the WordPress endpoint."""
     wp_url = wp_url.rstrip('/')
-    if "/th" not in wp_url:
+    # Skip adding /th for Bitcoinist and NewsBTC
+    if not any(domain in wp_url for domain in ["bitcoinist.com", "newsbtc.com"]) and "/th" not in wp_url:
         wp_url += "/th"
     return f"{wp_url}{endpoint_path}"
 
