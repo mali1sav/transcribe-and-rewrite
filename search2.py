@@ -608,15 +608,16 @@ def main():
     messages_placeholder = st.empty()
     
     if st.sidebar.button("Generate Article"):
-        if not urls_input.strip():
-            st.error("Please enter at least one URL.")
-            return
-        urls = [line.strip() for line in urls_input.splitlines() if line.strip()]
         transcripts = []
-        for url in urls:
-            extracted = extract_url_content(gemini_client, url, messages_placeholder)
-            if extracted:
-                transcripts.append(extracted)
+        
+        # Process URLs if provided
+        if urls_input.strip():
+            urls = [line.strip() for line in urls_input.splitlines() if line.strip()]
+            for url in urls:
+                extracted = extract_url_content(gemini_client, url, messages_placeholder)
+                if extracted:
+                    transcripts.append(extracted)
+        
         # Add additional content if provided
         if additional_content.strip():
             transcripts.append({
@@ -624,6 +625,11 @@ def main():
                 'source': 'Additional Content',
                 'url': ''
             })
+        
+        # Check if we have any content to process
+        if not transcripts:
+            st.error("Please provide either URLs or Additional Content to generate an article")
+            return
             
         # Process keywords
         keywords = [k.strip() for k in keywords_input.splitlines() if k.strip()]
