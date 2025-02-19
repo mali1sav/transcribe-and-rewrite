@@ -3,6 +3,10 @@ import re
 import json
 import time
 import base64
+import logging
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -11,7 +15,7 @@ from firecrawl import FirecrawlApp
 import markdown
 import tenacity
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 import google.generativeai as genai
 from together import Together
@@ -54,6 +58,44 @@ def construct_endpoint(wp_url, endpoint_path):
     if not any(domain in wp_url for domain in ["bitcoinist.com", "newsbtc.com"]) and "/th" not in wp_url:
         wp_url += "/th"
     return f"{wp_url}{endpoint_path}"
+
+# ------------------------------
+# YouTube Transcript Fetcher
+# ------------------------------
+
+class TranscriptFetcher:
+    def get_video_id(self, url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL."""
+        try:
+            video_id = re.search(r'(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11}).*', url)
+            return video_id.group(1) if video_id else None
+        except Exception as e:
+            logging.error(f"Error extracting video ID: {str(e)}")
+            return None
+
+    def get_transcript(self, url: str) -> Optional[Dict]:
+        """Get English transcript from YouTube."""
+        try:
+            video_id = self.get_video_id(url)
+            if not video_id:
+                logging.error(f"Could not extract video ID from URL: {url}")
+                return None
+
+            try:
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                full_text = " ".join(segment['text'] for segment in transcript)
+                logging.info(f"Successfully got YouTube transcript for video {video_id}")
+                return {
+                    'text': full_text,
+                    'segments': transcript
+                }
+            except (TranscriptsDisabled, NoTranscriptFound) as e:
+                logging.error(f"No transcript available for video {video_id}: {str(e)}")
+                return None
+
+        except Exception as e:
+            logging.error(f"Error getting YouTube transcript: {str(e)}")
+            return None
 
 # ------------------------------
 # Data Models
@@ -325,8 +367,33 @@ def jina_extract_via_r(url: str) -> dict:
 
 def extract_url_content(gemini_client, url, messages_placeholder):
     """
-    Extracts article content from a URL using the Jina REST API as the primary fallback.
+    Extracts article content from a URL. Handles both YouTube URLs (using transcript)
+    and regular web pages (using Jina REST API).
     """
+    # Check if it's a YouTube URL
+    fetcher = TranscriptFetcher()
+    video_id = fetcher.get_video_id(url)
+    
+    if video_id:
+        with messages_placeholder:
+            st.info(f"Extracting YouTube transcript from {url}...")
+        transcript_data = fetcher.get_transcript(url)
+        
+        if transcript_data:
+            with st.expander("Debug: YouTube Transcript", expanded=False):
+                st.write("Transcript data:", transcript_data)
+            return {
+                'title': "YouTube Video Transcript",
+                'url': url,
+                'content': transcript_data['text'],
+                'published_date': None,
+                'source': f"YouTube Video ({video_id})",
+                'author': None
+            }
+        else:
+            st.warning(f"Could not extract transcript from YouTube video. Falling back to Jina extraction...")
+    
+    # Fallback to Jina for non-YouTube URLs or if transcript extraction fails
     with messages_placeholder:
         st.info(f"Extracting content from {url} using Jina REST API...")
     fallback_data = jina_extract_via_r(url)
@@ -370,9 +437,27 @@ def init_gemini_client():
 )
 def clean_gemini_response(text):
     """Clean Gemini response to extract valid JSON."""
-    text = re.sub(r'```json\s*', '', text)
-    text = re.sub(r'```\s*$', '', text)
-    return text.strip()
+    # Extract JSON from code blocks if present
+    json_match = re.search(r'```(?:json)?\s*({[\s\S]*?})\s*```', text)
+    if json_match:
+        return json_match.group(1).strip()
+    
+    # If no code blocks, try to find a JSON object
+    json_match = re.search(r'({[\s\S]*?})', text)
+    if json_match:
+        return json_match.group(1).strip()
+    
+    # If no JSON object found, clean the text
+    text = re.sub(r'```(?:json)?\s*|```', '', text)
+    text = text.strip()
+    
+    # Ensure it's wrapped in curly braces
+    if not text.startswith('{'):
+        text = '{' + text
+    if not text.endswith('}'):
+        text = text + '}'
+    
+    return text
 
 def validate_article_json(json_str):
     """Validate article JSON against schema and return cleaned data."""
@@ -392,7 +477,9 @@ def validate_article_json(json_str):
             raise ValueError("Missing required field: title")
         if not data.get('content'):
             raise ValueError("Missing required field: content")
-        if not data.get('seo'):
+        # Handle case-insensitive 'seo' or 'SEO' field
+        seo_field = next((k for k in data.keys() if k.lower() == 'seo'), None)
+        if not seo_field:
             raise ValueError("Missing required field: seo")
         content = data['content']
         if not content.get('intro'):
@@ -401,7 +488,7 @@ def validate_article_json(json_str):
             raise ValueError("Missing required field: content.sections")
         if not content.get('conclusion'):
             raise ValueError("Missing required field: content.conclusion")
-        seo = data['seo']
+        seo = data[seo_field]
         required_seo = ['slug', 'metaTitle', 'metaDescription', 'excerpt', 'imagePrompt', 'altText']
         for field in required_seo:
             if not seo.get(field):
@@ -537,14 +624,14 @@ Structure your output as valid JSON with the following keys:
 - title: An engaging and click-worthy title (max 60 characters) with {primary_keyword} in first half.
 - content: An object with:
    - intro: Two-part introduction:
-     - Part 1 (meta description): Compelling 170-character summary with {primary_keyword}
+     - Part 1 (meta description): Compelling 160-character that will also represent as Meta Description with {primary_keyword} included. This part must be click-worthy and stimulate curiosity
      - Part 2: Detailed paragraph expanding on Part 1
    - sections: An array of exactly {section_count} objects, each with:
      - heading: H2 heading using power words (include {primary_keyword} and {secondary_keywords} where natural)
      - format: Choose the most appropriate format for this section:
-       - 'paragraph': For explanatory content (default)
-       - 'list': For steps, features, or benefits
-       - 'table': For comparisons or data
+       - 'paragraph': For explanatory content (default). Each section MUST have 2-3 detailed paragraphs (at least 3-4 sentences each) with in-depth analysis, data points, examples, and thorough explanations. Don't just summarize - dive deep into each point with supporting evidence and context.
+       - 'list': For steps, features, or benefits. Each list item MUST be comprehensive with 2-3 sentences of explanation, not just a short phrase. Include relevant examples, data points, or use cases for each item.
+       - 'table': For comparisons or data. Each cell MUST contain detailed explanations (2-3 sentences) with context and examples, not just single words. Include at least 3 rows of comprehensive comparisons.
      - paragraphs: Array of 2-4 elements based on the chosen format:
        - For 'paragraph': Regular paragraphs
        - For 'list': Bullet points or numbered items
@@ -558,7 +645,7 @@ Structure your output as valid JSON with the following keys:
    - metaTitle: Thai title with {primary_keyword}
    - metaDescription: Use the same text as the Part 1 of the intro.
    - excerpt: One Thai sentence summary
-   - imagePrompt: English photo description
+   - imagePrompt: The Image Prompt must be in English only. Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.
    - altText: Thai ALT text with {primary_keyword} while keeping technical terms and entities in English
    Ensure {primary_keyword} appears exactly once in title, metaTitle, and metaDescription.
 
@@ -575,7 +662,7 @@ IMPORTANT NOTES:
 
 2. Promotional Content Integration:
    - Choose the most contextually relevant position (preferably middle or end of article)
-   - Create a dedicated section with a natural heading that bridges the main topic and promotional content
+   - Create a dedicated section with a natural Thai heading that bridges the main topic and promotional content. You must create a sentence or two to transit seamlessly between them.
    - Weave in {primary_keyword} naturally within this section
    - Extract and use only key points that enhance the article's value
    - Trim lengthy promotional content while preserving core message
@@ -607,24 +694,55 @@ Return ONLY valid JSON, no additional commentary.
         try:
             # Try to parse the JSON response
             content = json.loads(response)
+            
             # Force dict output format
             if isinstance(content, list):
                 content = content[0] if content else {}
-                
+            
             # Validate and ensure required fields exist
+            if not isinstance(content, dict):
+                st.error("Response is not a valid dictionary")
+                return {}
+                
+            # Initialize required fields if missing
+            if 'title' not in content:
+                content['title'] = f"Latest News about {primary_keyword}"
+                
             if 'content' not in content:
                 content['content'] = {}
+                
+            if 'sections' not in content['content']:
+                content['content']['sections'] = []
+                
+            # Ensure each section has required fields
+            for section in content['content'].get('sections', []):
+                if 'format' not in section:
+                    section['format'] = 'paragraph'
+                if 'paragraphs' not in section:
+                    section['paragraphs'] = []
+                    
             if 'conclusion' not in content['content']:
                 content['content']['conclusion'] = 'บทความนี้นำเสนอข้อมูลเกี่ยวกับ ' + primary_keyword + ' ซึ่งเป็นประเด็นสำคัญในตลาดคริปโตที่ควรติดตาม'
+                
+            # Initialize SEO fields if missing
+            seo_field = next((k for k in content.keys() if k.lower() == 'seo'), 'seo')
+            if seo_field not in content:
+                content[seo_field] = {
+                    'slug': generate_slug_custom(primary_keyword),
+                    'metaTitle': f"Latest Updates on {primary_keyword}",
+                    'metaDescription': content.get('content', {}).get('intro', {}).get('Part 1', f"Latest news and updates about {primary_keyword}"),
+                    'excerpt': f"Stay updated with the latest {primary_keyword} developments",
+                    'imagePrompt': f"A photorealistic scene showing {primary_keyword} in a professional setting",
+                    'altText': f"{primary_keyword} latest updates and developments"
+                }
+            
             return content
+            
         except json.JSONDecodeError as e:
             st.error(f"JSON parsing error: {str(e)}")
             st.error("Raw response:")
             st.code(response)
             return {}
-
-            
-        return content
     except Exception as e:
         st.error(f"Error generating article: {str(e)}")
         return {}
@@ -823,15 +941,21 @@ def main():
             image_prompt = parsed_for_image.get("image_prompt")
             alt_text = parsed_for_image.get("image_alt")
             if image_prompt:
+                # Show original prompt
+                st.info(f"Original image prompt: '{image_prompt}'")
+                
                 # Remove Thai characters to pass a simpler English prompt to the image generator
                 image_prompt_english = re.sub(r'[\u0E00-\u0E7F]+', '', image_prompt).strip()
                 if not image_prompt_english:
-                    image_prompt_english = "A high-quality digital artwork of cryptocurrency news"
+                    image_prompt_english = "A photo-realistic scene of cryptocurrencies floating in the air, depicting the Crypto news"
+                    st.warning("Using fallback image prompt since no English text was found")
+                
+                # Show cleaned prompt
+                st.info(f"Cleaned English prompt for Together AI: '{image_prompt_english}'")
             else:
                 image_prompt_english = None
             
             if image_prompt_english:
-                st.info("Generating supplementary image from Together AI using English prompt...")
                 together_client = Together()
                 try:
                     response = together_client.images.generate(
