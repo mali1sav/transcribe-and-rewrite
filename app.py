@@ -243,14 +243,24 @@ Here are the transcripts to base the article on:
 
 def extract_image_prompt(article_text):
     """Extract the Image Prompt from the generated article using a more robust pattern."""
-    # This pattern looks for a line starting with "Image Prompt:" (case-insensitive)
-    pattern = r"(?i)^Image Prompt\s*[:\-]\s*(.*)$"
-    match = re.search(pattern, article_text, re.MULTILINE)
-    if match:
-        prompt = match.group(1).strip()
-        if prompt:
-            return prompt
-    # Fallback default prompt if none is found
+    # Try multiple possible patterns
+    patterns = [
+        r"(?i)^Image Prompt\s*[:\-]\s*(.+)$",  # Standard format
+        r"(?i)\[Image Prompt\]\s*(.+)(?:\n|$)",  # Markdown format
+        r"(?i)Image Prompt[:\-]\s*(.+)(?:\n|$)"  # Flexible format
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, article_text, re.MULTILINE)
+        if match:
+            prompt = match.group(1).strip()
+            if prompt:
+                logging.info(f"Found image prompt: {prompt}")
+                return prompt
+            
+    # If no prompt is found, log the issue
+    logging.warning("No image prompt found in article text. Using fallback prompt.")
+    logging.debug(f"Article text snippet: {article_text[:500]}...")
     return "A futuristic digital scene depicting cryptocurrency market trends with vibrant colors and dynamic motion."
 
 def extract_alt_text(article_text):
