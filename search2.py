@@ -19,6 +19,12 @@ from slugify import slugify
 
 load_dotenv()
 
+# Define site-specific edit URLs
+SITE_EDIT_URLS = {
+    "BITCOINIST": "https://bitcoinist.com/wp-admin/post.php?post={post_id}&action=edit&classic-editor",
+    "NEWSBTC": "https://www.newsbtc.com/wp-admin/post.php?post={post_id}&action=edit&classic-editor"
+}
+
 # ------------------------------
 # Utility Functions
 # ------------------------------
@@ -86,11 +92,51 @@ def parse_article(article_json):
     try:
         article = json.loads(article_json) if isinstance(article_json, str) else article_json
         content_parts = []
-        content_parts.append(article['content']['intro'])
+        
+        # Handle intro (either string or dict with parts)
+        intro = article['content']['intro']
+        if isinstance(intro, dict):
+            content_parts.append(intro.get('Part 1', ''))
+            content_parts.append(intro.get('Part 2', ''))
+        else:
+            content_parts.append(intro)
+        
+        # Handle sections with different formats
         for section in article['content']['sections']:
             content_parts.append(f"## {section['heading']}")
-            content_parts.extend(section['paragraphs'])
+            format_type = section.get('format', 'paragraph')
+            
+            if format_type == 'list':
+                # Format list items with bullets
+                content_parts.extend([f"* {item}" for item in section['paragraphs']])
+            elif format_type == 'table':
+                # Format table data
+                if section['paragraphs']:
+                    # Handle if the data is already in markdown table format
+                    if isinstance(section['paragraphs'][0], str) and section['paragraphs'][0].startswith('|'):
+                        content_parts.extend(section['paragraphs'])
+                    # Handle if the data is in array format
+                    elif isinstance(section['paragraphs'][0], (list, tuple)):
+                        headers = section['paragraphs'][0]
+                        rows = section['paragraphs'][1:]
+                        # Create markdown table
+                        content_parts.append('| ' + ' | '.join(str(h) for h in headers) + ' |')
+                        content_parts.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+                        for row in rows:
+                            content_parts.append('| ' + ' | '.join(str(cell) for cell in row) + ' |')
+                    # Handle if each row is a dict
+                    elif isinstance(section['paragraphs'][0], dict):
+                        headers = section['paragraphs'][0].keys()
+                        # Create markdown table
+                        content_parts.append('| ' + ' | '.join(str(h) for h in headers) + ' |')
+                        content_parts.append('| ' + ' | '.join(['---'] * len(headers)) + ' |')
+                        for row in section['paragraphs']:
+                            content_parts.append('| ' + ' | '.join(str(row.get(h, '')) for h in headers) + ' |')
+            else:
+                # Regular paragraphs
+                content_parts.extend(section['paragraphs'])
             content_parts.append("")
+            
         content_parts.append(article['content']['conclusion'])
         return {
             "main_title": article['title'],
@@ -200,7 +246,16 @@ def submit_article_to_wordpress(article, wp_url, username, wp_app_password, prim
         response = requests.post(endpoint, json=data, auth=HTTPBasicAuth(username, wp_app_password))
         if response.status_code in (200, 201):
             post = response.json()
-            st.success(f"Article '{data['title']}' submitted successfully! Post ID: {post.get('id')}")
+            post_id = post.get('id')
+            st.success(f"Article '{data['title']}' submitted successfully! Post ID: {post_id}")
+            
+            # If we have a site-specific edit URL, create a clickable link
+            if site_name in SITE_EDIT_URLS:
+                edit_url = SITE_EDIT_URLS[site_name].format(post_id=post_id)
+                st.markdown(f"📝 [Click here to edit your draft article]({edit_url})")
+                # Open the URL in a new browser tab
+                import webbrowser
+                webbrowser.open(edit_url)
             return post
         else:
             st.error(f"Failed to submit article. Status: {response.status_code}")
@@ -450,39 +505,81 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
                 source_texts += f"\n{content}\n"
         
         prompt = f"""
-You are an expert Thai crypto journalist. Using ONLY the exact source content provided below, craft a news article in Thai. DO NOT invent or modify any factual details. Your article must faithfully reflect the provided source text.
+You are an expert Thai crypto journalist and SEO specialist. Using ONLY the exact source content provided below, craft an SEO-optimized article in Thai. DO NOT invent or modify any factual details. Your article must faithfully reflect the provided source text.
+
+Keep technical terms and entity names in English but the rest should be in Thai.
 
 Primary Keyword: {primary_keyword}
 Secondary Keywords: {secondary_keywords}
 News Angle: {news_angle}
 
+SEO Guidelines:
+1. Primary Keyword ({primary_keyword}) Distribution:
+   - Title: Include naturally in the first half (1x)
+   - First Paragraph: Include naturally (1x)
+   - H2 Headings: Include in at least 2 headings
+   - Body content: Include naturally 3 times where relevant
+   - Meta Description: Include naturally (1x)
+   - Maintain original form (Thai/English) consistently
+
+2. Secondary Keywords ({secondary_keywords}) Usage:
+   - Include in 2 H2 headings where relevant
+   - Use naturally in supporting paragraphs
+   - Maximum density: 3% (3 mentions per 100 words)
+
 Structure your output as valid JSON with the following keys:
-- title: A news-style title in Thai that includes the primary keyword exactly.
+- title: An engaging and click-worthy title (max 60 characters) with {primary_keyword} in first half.
 - content: An object with:
-   - intro: A compelling introduction paragraph in Thai that naturally embeds one concise attribution in the format [Source Name](Source URL). This intro will also serve as the meta description, so make it informative and engaging before transitioning into the main content.
+   - intro: Two-part introduction:
+     - Part 1 (meta description): Compelling 170-character summary with {primary_keyword}
+     - Part 2: Detailed paragraph expanding on Part 1
    - sections: An array of exactly {section_count} objects, each with:
-         - heading: An H2 heading in Thai using power words.
-         - paragraphs: An array of 2-4 detailed paragraphs that accurately reflect the source content.
-         {f'One section MUST seamlessly integrate this promotional content while maintaining natural flow and mentioning the primary keyword: {promotional_text}' if promotional_text else ''}
-   - conclusion: A concluding paragraph summarizing the key points of the article.
+     - heading: H2 heading using power words (include {primary_keyword} and {secondary_keywords} where natural)
+     - format: Choose the most appropriate format for this section:
+       - 'paragraph': For explanatory content (default)
+       - 'list': For steps, features, or benefits
+       - 'table': For comparisons or data
+     - paragraphs: Array of 2-4 elements based on the chosen format:
+       - For 'paragraph': Regular paragraphs
+       - For 'list': Bullet points or numbered items
+       - For 'table': Array of rows with headers
+       Include {primary_keyword} naturally where relevant.
+         {f'One section MUST seamlessly integrate this promotional content while maintaining natural flow and mentioning the {primary_keyword}: {promotional_text}' if promotional_text else ''}
+   - conclusion: A concluding paragraph summarizing the key points of the article while mentioning the {primary_keyword} naturally.
 - sources: An array of objects with keys "domain" and "url" for each source (each included only once).
 - seo: An object with keys:
-   - slug: English URL-friendly slug{' that MUST end with "-thailand"' if selected_site in ['BITCOINIST', 'NEWSBTC'] else ''}
-   - metaTitle: Thai title with primary keyword
-   - metaDescription: Use the same text as the intro paragraph
+   - slug: English URL-friendly slug that MUST include {primary_keyword}{' and end with "-thailand"' if selected_site in ['BITCOINIST', 'NEWSBTC'] else ''}
+   - metaTitle: Thai title with {primary_keyword}
+   - metaDescription: Use the same text as the Part 1 of the intro.
    - excerpt: One Thai sentence summary
    - imagePrompt: English photo description
-   - altText: Thai ALT text with English terms
-   Ensure the primary keyword appears exactly once in title, metaTitle, and metaDescription.
+   - altText: Thai ALT text with {primary_keyword} while keeping technical terms and entities in English
+   Ensure {primary_keyword} appears exactly once in title, metaTitle, and metaDescription.
 
 IMPORTANT NOTES:
-1. If promotional content is provided:
-   - Choose the most contextually relevant position to insert it (beginning, middle, or end of the sections)
+1. Content Balance Guidelines:
+   - Main Content (70%):
+     * Focus on news, analysis, and key information from source URLs
+     * Ensure comprehensive coverage of the main topic
+     * Maintain journalistic integrity and depth
+   - Promotional Content (30%):
+     * Select only the most relevant points from promotional text
+     * Limit to 2-3 paragraphs maximum
+     * Focus on points that naturally connect with the main topic
+
+2. Promotional Content Integration:
+   - Choose the most contextually relevant position (preferably middle or end of article)
    - Create a dedicated section with a natural heading that bridges the main topic and promotional content
-   - Weave in the primary keyword naturally within this section
+   - Weave in {primary_keyword} naturally within this section
+   - Extract and use only key points that enhance the article's value
+   - Trim lengthy promotional content while preserving core message
    - Ensure the promotional section reads like a natural part of the article's narrative
-2. The promotional section should maintain the same tone and style as the rest of the article
-3. DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
+
+3. General Guidelines:
+   - Maintain consistent tone and style throughout
+   - DO NOT modify or invent any factual details
+   - Preserve any image markdown exactly as provided
+   - Ensure promotional content supports rather than overshadows the main story
 
 IMPORTANT: DO NOT modify or invent any new factual details. Preserve any image markdown found within the analysis paragraphs exactly as provided.
 
@@ -662,12 +759,39 @@ def main():
             st.json(article_json)
             st.subheader("Article Content Preview")
             st.write(f"**{article_json['title']}**")
-            st.write(article_json['content']['intro'])
+            # Display intro parts
+            if isinstance(article_json['content']['intro'], dict):
+                st.write(article_json['content']['intro'].get('Part 1', ''))
+                st.write(article_json['content']['intro'].get('Part 2', ''))
+            else:
+                st.write(article_json['content']['intro'])
+            
+            # Display sections with different formats
             for section in article_json['content']['sections']:
                 st.write(f"### {section['heading']}")
-                for para in section['paragraphs']:
-                    st.write(para)
+                format_type = section.get('format', 'paragraph')
+                
+                if format_type == 'list':
+                    for item in section['paragraphs']:
+                        st.write(f"* {item}")
+                elif format_type == 'table':
+                    # If the data is already in markdown table format
+                    if isinstance(section['paragraphs'][0], str) and section['paragraphs'][0].startswith('|'):
+                        for row in section['paragraphs']:
+                            st.write(row)
+                    # If the data is in array or dict format
+                    elif section['paragraphs']:
+                        import pandas as pd
+                        if isinstance(section['paragraphs'][0], (list, tuple)):
+                            df = pd.DataFrame(section['paragraphs'][1:], columns=section['paragraphs'][0])
+                        elif isinstance(section['paragraphs'][0], dict):
+                            df = pd.DataFrame(section['paragraphs'])
+                        st.table(df)
+                else:  # default paragraph format
+                    for para in section['paragraphs']:
+                        st.write(para)
                 st.write("")
+            
             st.write("**บทสรุป:**")
             st.write(article_json['content']['conclusion'])
         except json.JSONDecodeError as e:
@@ -760,7 +884,8 @@ def main():
                         wp_url, 
                         wp_username, 
                         wp_app_password, 
-                        primary_keyword=primary_keyword_upload
+                        primary_keyword=primary_keyword_upload,
+                        site_name=st.session_state.get('selected_site')
                     )
                 except Exception as e:
                     st.error(f"Error during upload process: {str(e)}")
