@@ -22,7 +22,8 @@ load_dotenv()
 # Define site-specific edit URLs
 SITE_EDIT_URLS = {
     "BITCOINIST": "https://bitcoinist.com/wp-admin/post.php?post={post_id}&action=edit&classic-editor",
-    "NEWSBTC": "https://www.newsbtc.com/wp-admin/post.php?post={post_id}&action=edit&classic-editor"
+    "NEWSBTC": "https://www.newsbtc.com/wp-admin/post.php?post={post_id}&action=edit&classic-editor",
+    "ICOBENCH": "https://icobench.com/th/wp-admin/post.php?post={post_id}&action=edit&classic-editor"
 }
 
 # ------------------------------
@@ -39,7 +40,12 @@ def escape_special_chars(text):
 
 def generate_slug_custom(text):
     """Generate a sanitized slug using python-slugify."""
-    return slugify(text, lowercase=True, max_length=200, word_boundary=True)
+    # Convert to lowercase first
+    text = text.lower()
+    # Use basic slugify without extra parameters
+    slug = slugify(text)
+    # Trim to max length if needed
+    return slug[:200] if len(slug) > 200 else slug
 
 def construct_endpoint(wp_url, endpoint_path):
     """Construct the WordPress endpoint."""
@@ -198,7 +204,7 @@ def upload_image_to_wordpress(b64_data, wp_url, username, wp_app_password, filen
         st.error(f"[Upload] Exception during image upload: {e}")
         return None
 
-def submit_article_to_wordpress(article, wp_url, username, wp_app_password, primary_keyword=""):
+def submit_article_to_wordpress(article, wp_url, username, wp_app_password, primary_keyword="", site_name=None):
     """
     Submits the article to WordPress using the WP REST API.
     Sets Yoast SEO meta fields and auto-selects the featured image.
@@ -604,6 +610,12 @@ Return ONLY valid JSON, no additional commentary.
             # Force dict output format
             if isinstance(content, list):
                 content = content[0] if content else {}
+                
+            # Validate and ensure required fields exist
+            if 'content' not in content:
+                content['content'] = {}
+            if 'conclusion' not in content['content']:
+                content['content']['conclusion'] = 'บทความนี้นำเสนอข้อมูลเกี่ยวกับ ' + primary_keyword + ' ซึ่งเป็นประเด็นสำคัญในตลาดคริปโตที่ควรติดตาม'
             return content
         except json.JSONDecodeError as e:
             st.error(f"JSON parsing error: {str(e)}")
