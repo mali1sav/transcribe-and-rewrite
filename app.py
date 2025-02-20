@@ -42,35 +42,76 @@ class TranscriptFetcher:
             return None
 
     def get_transcript(self, url: str, language: str = "Auto-detect") -> Optional[Dict]:
-        """Get transcript from YouTube."""
-        try:
-            video_id = self.get_video_id(url)
-            if not video_id:
-                logger.error(f"Could not extract video ID from URL: {url}")
-                return None
+        """Get transcript from YouTube with enhanced error handling and retries."""
+        import time
+        from youtube_transcript_api._errors import (
+            TranscriptsDisabled,
+            NoTranscriptFound,
+            VideoUnavailable,
+            TooManyRequests
+        )
 
-            try:
-                if language == "Thai":
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['th'])
-                elif language == "English":
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
-                else:
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id)
-                
-                full_text = " ".join(segment['text'] for segment in transcript)
-                logger.info(f"Successfully got YouTube transcript for video {video_id}")
-                return {
-                    'text': full_text,
-                    'segments': transcript,
-                    'language': language
-                }
-            except (TranscriptsDisabled, NoTranscriptFound) as e:
-                logger.error(f"No transcript available for video {video_id}: {str(e)}")
-                return None
-
-        except Exception as e:
-            logger.error(f"Error getting YouTube transcript: {str(e)}")
+        video_id = self.get_video_id(url)
+        if not video_id:
+            logger.error(f"Could not extract video ID from URL: {url}")
             return None
+
+        # Define language codes based on selection
+        language_codes = {
+            "Thai": ['th'],
+            "English": ['en'],
+            "Auto-detect": None
+        }.get(language, None)
+
+        # Try different transcript types in order
+        transcript_types = [
+            {'languages': language_codes},  # First try specified language
+            {'languages': None},            # Then try any language
+            {'languages': language_codes, 'manual_captions': True},  # Try manual captions
+            {'languages': None, 'manual_captions': True}  # Finally try any manual captions
+        ]
+
+        for attempt in range(3):  # Max 3 attempts
+            try:
+                for transcript_type in transcript_types:
+                    try:
+                        # Add delay between attempts to avoid rate limiting
+                        if attempt > 0:
+                            time.sleep(2 ** attempt)  # Exponential backoff
+
+                        transcript = YouTubeTranscriptApi.get_transcript(
+                            video_id,
+                            **transcript_type
+                        )
+                        
+                        full_text = " ".join(segment['text'] for segment in transcript)
+                        logger.info(f"Successfully got YouTube transcript for video {video_id}")
+                        return {
+                            'text': full_text,
+                            'segments': transcript,
+                            'language': language
+                        }
+                        
+                    except (TranscriptsDisabled, NoTranscriptFound):
+                        continue  # Try next transcript type
+                        
+            except VideoUnavailable as e:
+                logger.error(f"Video {video_id} is unavailable: {str(e)}")
+                return None
+            except TooManyRequests as e:
+                logger.warning(f"Rate limited on attempt {attempt + 1} for video {video_id}")
+                if attempt == 2:  # Last attempt
+                    logger.error(f"Failed to get transcript for video {video_id} after 3 attempts")
+                    return None
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error getting transcript for video {video_id}: {str(e)}")
+                if attempt == 2:  # Last attempt
+                    return None
+                continue
+
+        logger.error(f"Failed to get transcript for video {video_id} after all attempts")
+        return None
 
 def process_sources(fetcher: TranscriptFetcher, yt_url1, channel1, yt_url2, channel2, yt_url3, channel3, text_content, language):
     """Process all sources synchronously with retry logic"""
