@@ -18,6 +18,7 @@ import time
 import tenacity
 from pydantic import BaseModel
 from firecrawl import FirecrawlApp
+import markdown
 
 load_dotenv()
 
@@ -30,7 +31,7 @@ def init_exa_client():
 def get_domain(url):
     try:
         return url.split('/')[2]
-    except:
+    except Exception:
         return url
 
 def init_gemini_client():
@@ -171,8 +172,8 @@ def extract_url_content(gemini_client, url, messages_placeholder):
         with messages_placeholder:
             st.info(f"Firecrawl failed, trying Gemini for {url}...")
         prompt = f"""Extract the main article content from this URL: {url}
-        Return ONLY the article text content, no additional formatting or commentary.
-        If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
+Return ONLY the article text content, no additional formatting or commentary.
+If you cannot access the content, respond with 'EXTRACTION_FAILED'."""
         
         response = make_gemini_request(gemini_client, prompt)
         
@@ -193,24 +194,20 @@ def extract_url_content(gemini_client, url, messages_placeholder):
 
 # ---------------------------------------------------------------------------
 # Helper function to sanitize text by removing control characters.
-# This will remove non-printable characters that make the text look corrupted.
 # ---------------------------------------------------------------------------
 def sanitize_text(text):
     # Remove control characters (except newline and tab)
     return ''.join(ch for ch in text if unicodedata.category(ch)[0] != "C" or ch in "\n\t ")
 
 # ---------------------------------------------------------------------------
-# MODIFIED: Use a full day filter instead of a relative 'hours_back' filter.
-# This now defaults to today's full day in UTC to match Exa's playground behavior.
+# Use a full day filter for Exa's search.
 # ---------------------------------------------------------------------------
 def perform_exa_search(exa_client, query, num_results=10, specific_date=None):
     try:
         if specific_date:
-            # If a specific date is provided, use that day’s full range.
             start_date = datetime(specific_date.year, specific_date.month, specific_date.day, 0, 0, 0, tzinfo=timezone.utc)
             end_date = datetime(specific_date.year, specific_date.month, specific_date.day, 23, 59, 59, 999000, tzinfo=timezone.utc)
         else:
-            # Default: use today's full day in UTC.
             now = datetime.now(timezone.utc)
             start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
             end_date = now.replace(hour=23, minute=59, second=59, microsecond=999000)
@@ -237,7 +234,6 @@ def perform_exa_search(exa_client, query, num_results=10, specific_date=None):
         excluded_domains = ['twitter.com', 'youtube.com', 'youtu.be']
         
         for result in results:
-            # Get URL and check against excluded domains
             url = str(getattr(result, 'url', '') or '')
             domain = get_domain(url)
             if any(excluded in domain for excluded in excluded_domains):
@@ -245,11 +241,8 @@ def perform_exa_search(exa_client, query, num_results=10, specific_date=None):
                 
             title = str(getattr(result, 'title', 'No Title') or 'No Title')
             text = str(getattr(result, 'text', '') or '')
-            
-            # Sanitize the text to remove corrupted/control characters.
             text = sanitize_text(text)
             
-            # Parse date if available
             published_date = None
             if hasattr(result, 'published_date') and result.published_date:
                 try:
@@ -286,12 +279,10 @@ def perform_web_research(exa_client, query, hours_back, search_engines=None):
     results = []
     
     try:
-        # Get results from Exa
         exa_results = perform_exa_search(
             exa_client=exa_client,
             query=query,
-            num_results=10  # Adjust num_results as needed
-            # Note: The hours_back parameter is no longer used here.
+            num_results=10
         )
         if exa_results:
             results.extend(exa_results)
@@ -319,19 +310,18 @@ def serialize_search_results(search_results):
     return serialized_results
 
 def prepare_content_for_article(selected_results):
-    """Takes a list of results, each with 'url','source','text', and returns a 'transcript' list for GPT."""
+    """Takes a list of results and returns a list for GPT article generation."""
     try:
         prepared_content = []
         for result in selected_results:
             url = result.get('url', '').strip()
             source = result.get('source', '').strip()
-            # Handle both 'text' and 'content' fields for compatibility
             content = result.get('content', result.get('text', '')).strip()
             
             content_item = {
                 'url': url,
                 'source': source,
-                'content': content  # Changed from 'text' to match generate_article's expected format
+                'content': content
             }
             prepared_content.append(content_item)
         return prepared_content
@@ -341,9 +331,7 @@ def prepare_content_for_article(selected_results):
 
 def escape_special_chars(text):
     """Escape special characters that might interfere with Markdown formatting."""
-    # Escape dollar signs that aren't already part of a LaTeX equation
     text = re.sub(r'(?<!\$)\$(?!\$)', r'\$', text)
-    # Escape other special Markdown characters
     chars_to_escape = ['*', '_', '`', '#', '~', '|', '<', '>', '[', ']']
     for char in chars_to_escape:
         text = text.replace(char, '\\' + char)
@@ -354,9 +342,8 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
         if not transcripts:
             return None
 
-        # Keywords should already be a list from the text area split
         keyword_list = keywords if keywords else []
-        primary_keyword = keyword_list[0].upper() if keyword_list else ""
+        primary_keyword = keyword_list[0] if keyword_list else ""
         secondary_keywords = ", ".join(keyword_list[1:]) if len(keyword_list) > 1 else ""
         
         shortcode_map = {
@@ -367,60 +354,38 @@ def generate_article(client, transcripts, keywords=None, news_angle=None, sectio
             "DOGECOIN": '[latest_articles label="ข่าว Dogecoin ล่าสุด" count_of_posts="6" taxonomy="category" term_id="527"]'
         }
         
+        # --- Revised prompt with explicit, concise citation rules ---
         prompt = f"""
-Write a comprehensive and in-depth news article in Thai (Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
-When creating section headings (H2) and subheadings (H3), use power words that often in appear in Thai crypto news headline or create curiosity, bold statements, or specific numbers/stats when relevant to show analytical value.
+Write a comprehensive and in-depth news article in Thai (including Title, Main Content, บทสรุป, Excerpt for WordPress, Title & H1 Options, and Meta Description Options all in Thai).
+When creating section headings (H2) and subheadings (H3), use engaging language, power words, and when needed, specific numbers/stats that show analytical value.
+Keep technical terms and entity names in English but the rest should be in Thai.
 
-Primary Keyword: {primary_keyword or ""}
+Primary Keyword: {primary_keyword}
 Secondary Keywords: {keywords or ""}
 News Angle: {news_angle or ""}
 
-**Important:** Use the primary keyword exactly as provided (e.g., "Dogecoin") without converting it to uppercase in the title, meta description, h1, and article text.
+**IMPORTANT CITATION RULES:**
+- In the **first paragraph only** of the Main Content, include a single, natural citation for each source using this format: [Source Domain Name](url).
+- Group all facts from a source under that single citation.
+- Do **not** include any source citations in any other part of the article.
+- If you refer to the same source later, simply state the facts without re-citing.
 
 # Content Focus Instructions:
-* The article MUST be written from the perspective of the specified News Angle above
-* Only include information from sources that is relevant to and supports this news angle
-* Analyze each source and extract only the content that aligns with or provides context for the news angle
-* If a source contains information not relevant to the news angle, exclude it
-* Ensure each section contributes to developing the specified news angle
-* Maintain focus throughout the article - avoid tangents or unrelated information
+* The article MUST be written from the perspective of the specified News Angle.
+* Only include information from sources that is relevant to and supports this news angle.
+* Analyze each source and extract only the content that aligns with or provides context for the news angle.
+* Ensure each section contributes to developing the specified news angle.
+* Maintain focus throughout the article.
 
-# Source Citation Rules:
-* CRITICAL: Each source must be cited EXACTLY ONCE in the FIRST PARAGRAPH ONLY
-* Citations must follow this exact format: [Source domain name](url)
-* All facts and information from a source must be attributed in a single citation
-* DO NOT repeat source citations in later paragraphs or sections
-* If you need to reference information from a previously cited source, simply state the facts without re-citing
-* Example of correct citation format:
-  ✅ "According to [BBC News](url), Event A occurred, while [Reuters](url) reported Event B, and [Bloomberg](url) noted Event C. These developments suggest..."
-* Examples of incorrect citation formats:
-  ❌ Multiple citations of same source: "BBC News reports... Later, BBC News stated..."
-  ❌ Citations outside first paragraph: "In a related development, BBC News reported..."
-  ❌ Separate citations for related facts: "[BBC News](url) reported X. Later in the story, [BBC News](url) mentioned Y."
-* IMPORTANT: Group ALL facts from each source into a SINGLE citation in the first paragraph
+SEO Guidelines:
+* Title: Include {primary_keyword} exactly once. Must be under 60 characters. Must be engaging, and click-worthy, news-like headline.
+* Meta Description: Include {primary_keyword} exactly once. Must be under 160 characters. Must be engaging, and click-worthy, encourage curiosity and interest.
+* H1: Include {primary_keyword} exactly once. Must align with the title. Must be engaging, and click-worthy, news-like headline.
 
-# Main Content (also applicable to H1,H2, Title, and Meta Description) Guidelines:
-* Keep the following terms in English, rest in Thai:
-  - Technical terms
-  - Entity names
-  - People names
-  - Place names (including cities, states, countries)
-  - Organizations
-  - Company names
-  - Cryptocurrency names (use proper capitalization: "Bitcoin", not "BITCOIN" or "bitcoin")
-  - Platform names
-  - Government entities (e.g., "Illinois State", not "รัฐอิลลินอยส์")
-* Use proper capitalization for all terms:
-  - Cryptocurrencies: "Bitcoin", "Ethereum", "Solana"
-  - Companies: "Binance", "Coinbase"
-  - Organizations: "Federal Reserve", "Securities and Exchange Commission"
-  - Never use ALL CAPS unless it's a widely recognized acronym (e.g., "FBI", "SEC")
-
-* Ensure to avoid unintended Markdown or LaTeX formatting.
-* Create exactly {section_count} heading level 2 in Thai for the main content (keep technical terms and entity names in English).
-* For each section, ensure a thorough and detailed exploration of the topic, with each section comprising at least 2-4 paragraphs of comprehensive analysis. Strive to simplify complex ideas, making them accessible and easy to grasp. Where applicable, incorporate relevant data, examples, or case studies to substantiate your analysis and provide clarity.
-* Use heading level 2 for each section heading. Use sub-headings if necessary. For each sub-heading, provide real examples, references, or numeric details from the sources, with more extensive context.
-* If the content contains numbers that represent monetary values, remove $ signs before numbers and add " ดอลลาร์" after the number, ensuring a single space before and after the numeric value.
+# Main Content Guidelines:
+* Include exactly {section_count} H2 sections in Thai (with technical terms and entity names in English).
+* Each section should have 2-4 detailed paragraphs.
+* Remove any $ signs from monetary values and replace them with " ดอลลาร์" (with proper spacing).
 
 # Promotional Content Guidelines
 {f'''
@@ -428,60 +393,49 @@ News Angle: {news_angle or ""}
 ----------------------------------------
 {promotional_text}
 
-* Requirements:
-  1. Create a seamless Heading Level 2 that is semantically aligned with the {news_angle} in Thai (keep technical terms and entity names in English but the rest of sentence in Thai).
-  2. The content must be in Thai (keep technical terms and entity names in English but the rest in Thai).
-  3. Transit seamlessly from the main content into the promotional text.
-  4. Find a way to mention {primary_keyword} in a seamless way.
-  5. Limit promotional text to 120 words, placed at the end of the article.
+* Create a seamless H2 section aligned with the {news_angle} in Thai.
+* Integrate the promotional text (max 120 words) at the end of the article.
+* Mention {primary_keyword} naturally.
 ''' if promotional_text else ''}
 
 # Article Structure:
 ## Title
-[Create an engaging news-style title that includes {primary_keyword} once, maintaining its original form]
+[Create an engaging title that includes {primary_keyword} exactly once]
 
 ## Main Content
-[First paragraph must include {primary_keyword} once in its original form]
+[The first paragraph must include one natural citation per source as specified above]
 
-[Create H2 sections below, with at least 2 containing {primary_keyword}. Each H2 should align with the news angle]
-
-[Write supporting paragraphs using {primary_keyword} and {secondary_keywords} (if exists) where they fit naturally. 
-]
-
-[Conclude with a summary emphasizing the news angle's significance include{primary_keyword} if they fit naturally]
+[Include H2 sections and supporting paragraphs with natural use of {primary_keyword} and {secondary_keywords}]
 
 ## SEO Elements
-1. Title Options (include {primary_keyword} once, maintain original form):
-   - [Option 1: News-focused title]
-   - [Option 2: Number-focused title]
-   - [Option 3: Question-based title]
+1. Title Options:
+   - [Option 1]
+   - [Option 2]
+   - [Option 3]
 
-2. Meta Description Options (include {primary_keyword} once):
-   - [Option 1: News angle + key benefit]
-   - [Option 2: Number-focused]
-   - [Option 3: Question to stimulate curiosity]
+2. Meta Description Options:
+   - [Option 1]
+   - [Option 2]
+   - [Option 3]
 
-3. H1 Options (aligned with Title and Meta Description including {primary_keyword}):
-   - [Option 1: Direct news statement]
-   - [Option 2: Number-focused statement]
-   - [Option 3: Engaging question]
+3. H1 Options:
+   - [Option 1]
+   - [Option 2]
+   - [Option 3]
 
 ## Additional Elements
-Slug URL in English (must include {primary_keyword}; translate Thai keywords to English)
-- Image ALT Text in Thai including {primary_keyword} (keep technical terms and entity names in English, rest in Thai)
+Slug URL in English (must include {primary_keyword})
+- Image ALT Text in Thai including {primary_keyword}
 - Excerpt for WordPress: One sentence in Thai that briefly describes the article
 
 ## Image Prompt
-[Create a photorealistic scene that fits the main news article, focusing on 1-2 main objects. Keep it simple and clear. Don't include anything from promotional content. Avoid charts, graphs, or technical diagrams as they don't work well with image generation.]
+[Create a photorealistic scene based on the article content. Avoid promotional elements.]
 
 # Source Usage Instructions:
-* Use provided sources as primary reference for facts and data
-* Your knowledge can supplement for context and understanding, but never override source information
-* When source information exists on a topic, it takes precedence over general knowledge
-
-Here are the sources to base the article on:
+* Use the provided sources as the basis for all facts and data.
+* Do not repeat a source citation beyond the first paragraph.
 """
-        # Append transcripts with escaped special characters, ensuring each source attribution appears only once
+        # Append source content. Note: Only include the citation header once per source.
         seen_sources = set()
         for t in transcripts:
             source = t['source']
@@ -491,14 +445,11 @@ Here are the sources to base the article on:
             else:
                 prompt += f"{escape_special_chars(t['content'])}\n\n"
 
-        # Make API request with retries and error handling
         content = make_gemini_request(client, prompt)
         if not content:
             return None
             
-        shortcode = shortcode_map.get(primary_keyword, "")
-        
-        # 1) Insert the relevant shortcode in the final text
+        shortcode = shortcode_map.get(primary_keyword.upper(), "")
         if shortcode:
             excerpt_split = "Excerpt for WordPress:"
             if excerpt_split in content:
@@ -511,7 +462,6 @@ Here are the sources to base the article on:
             else:
                 content += f"\n\n{shortcode}\n\n----------------\n"
         
-        # 2) Post-processing to remove "$" and replace with " ดอลลาร์"
         content = re.sub(r"\$(\d[\d,\.]*)", r"\1 ดอลลาร์", content)
         
         return content
@@ -531,7 +481,6 @@ def load_promotional_content():
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read().strip()
-                        # Use filename without extension as key
                         name = os.path.splitext(filename)[0]
                         content_map[name] = content
                 except Exception as e:
@@ -586,49 +535,43 @@ def main():
         st.error(f"❌ Failed to initialize clients: {str(e)}")
         return
 
-    # Create a placeholder for messages in the main area
     messages_placeholder = st.empty()
 
     # -------------------------------
     # SIDEBAR: Re-ordered UI Elements
     # -------------------------------
     with st.sidebar:
-        # Radio buttons at the top
         content_source = st.radio(
             "How would you like to generate your article?",
             ["Generate from URLs", "Search and Generate"],
             key="content_source"
         )
         
-        # Content source–specific input boxes immediately below the radio buttons
         if content_source == "Generate from URLs":
             st.text_area(
                 "URLs to Extract",
                 height=100,
                 key="user_main_text",
-                help="Enter URLs (one per line) to automatically extract content from news articles. Each URL will be processed using Firecrawl or Gemini."
+                help="Enter URLs (one per line) to extract content from news articles."
             )
         elif content_source == "Search and Generate":
             st.text_input("Enter your search query:", value=st.session_state.query, key="query")
             st.slider("Hours to look back:", 1, 744, 12, key="hours_back")
         
-        # Common input fields
         st.text_area(
             "Keywords (one per line)",
             height=68,
             key="keywords",
-            help="Enter one keyword per line. The first keyword will be the primary keyword for SEO optimization."
+            help="Enter one keyword per line. The first keyword is the primary keyword for SEO."
         )
         news_angle = st.text_input(
             "News Angle",
             value="",
             key="news_angle",
-            help="""This can be in Thai or English. Having a clear news angle is essential, especially when sources may lack focus which is bad for SEO. A well-defined angle helps create a coherent narrative around your chosen perspective.
-            Tips: You can use one of the English headlines from your selected news sources as your news angle."""
+            help="A clear news angle is essential to create a coherent narrative."
         )
         section_count = st.slider("Number of sections:", 2, 8, 3, key="section_count")
         
-        # Promotional content selection
         promotional_content = load_promotional_content()
         st.write("Promotional Content")
         selected_promotions = []
@@ -637,7 +580,6 @@ def main():
                 selected_promotions.append(promotional_content[name])
         promotional_text = "\n\n".join(selected_promotions) if selected_promotions else None
 
-        # Action button positioned at the bottom of the sidebar
         if content_source == "Generate from URLs":
             action_clicked = st.button("Generate Article from URLs", type="primary")
         elif content_source == "Search and Generate":
@@ -654,7 +596,7 @@ def main():
                     st.error("Please enter at least one URL in the URLs to Extract box")
             else:
                 st.session_state.generating = True
-                st.session_state.selected_indices = []  # Clear any previous selections
+                st.session_state.selected_indices = []
                 st.session_state.process_urls = True
                 st.session_state.urls_to_process = [url.strip() for url in user_main_text.splitlines() if url.strip()]
         elif content_source == "Search and Generate":
@@ -680,7 +622,6 @@ def main():
     # --------------------------------
     # MAIN AREA: Display Search Results and Process URLs
     # --------------------------------
-    # Show search results if available (from "Search and Generate")
     if st.session_state.search_results:
         results = st.session_state.search_results
         st.subheader("Search Results")
@@ -708,7 +649,7 @@ def main():
                             return "Unknown time"
                         try:
                             utc_time = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
-                            local_tz = pytz.timezone('Asia/Bangkok')  # Default to Bangkok time
+                            local_tz = pytz.timezone('Asia/Bangkok')
                             local_time = utc_time.astimezone(local_tz)
                             return local_time.strftime('%Y-%m-%d %H:%M:%S')
                         except:
@@ -725,8 +666,6 @@ def main():
         if st.session_state.selected_indices:
             if st.button("Generate Article from all sources", type="primary"):
                 st.session_state.generating = True
-                
-                # Prepare content from selected search results
                 prepared_content = []
                 for idx in st.session_state.selected_indices:
                     result = results['results'][idx]
@@ -736,7 +675,6 @@ def main():
                         "content": result['text']
                     })
                 
-                # Add additional content if provided (only applicable if "Generate from URLs" was used)
                 if content_source == "Generate from URLs":
                     additional_content = []
                     for line in st.session_state.get("user_main_text", "").strip().split('\n'):
@@ -746,7 +684,7 @@ def main():
                             extracted = extract_url_content(gemini_client, line, messages_placeholder)
                             if extracted:
                                 additional_content.append(extracted)
-                        elif line:  # If it's not a URL but has content
+                        elif line:
                             additional_content.append({
                                 'title': 'User Provided Content',
                                 'url': '',
@@ -767,10 +705,7 @@ def main():
                     try:
                         with messages_placeholder:
                             st.info("Generating article...")
-                        # Convert keywords string to list if it exists
                         keywords = st.session_state.keywords.split('\n') if st.session_state.keywords else []
-                        
-                        # Always include promotional text if provided
                         promo_text = promotional_text.strip() if promotional_text else None
                         
                         article = generate_article(
@@ -796,7 +731,6 @@ def main():
                         st.error("No content available to generate article from")
                     st.session_state.generating = False
 
-    # Process URLs section (for "Generate from URLs" option)
     if st.session_state.process_urls and st.session_state.urls_to_process:
         additional_content = []
         for line in st.session_state.urls_to_process:
@@ -849,29 +783,34 @@ def main():
             with messages_placeholder:
                 st.error("No content could be extracted from the provided URLs")
         
-        # Reset URL processing flags
         st.session_state.process_urls = False
         st.session_state.urls_to_process = None
         st.session_state.generating = False
 
-    # Show generated article at the bottom
     if st.session_state.article:
-        st.markdown("---")  # Visual separator
-        st.subheader("Generated Article")
+        st.markdown("---")
+        st.subheader("Generated Article (Rendered Markdown)")
+        
+        # Show the rendered Markdown as usual
         cleaned_article = st.session_state.article.replace("**Title:**", "## Title")
         cleaned_article = cleaned_article.replace("**Main Content:**", "## Main Content")
         cleaned_article = re.sub(r'\*\*([^*]+)\*\*', r'\1', cleaned_article)
+        
+        # This displays it as nicely formatted Markdown in Streamlit
         st.markdown(cleaned_article)
-            
+        
+        # Optionally, provide a download button for the raw Markdown
         st.download_button(
-            label="Download Article",
+            label="Download Article (Markdown)",
             data=st.session_state.article,
             file_name="generated_article.md",
             mime="text/markdown",
             use_container_width=True
         )
 
-        # Handle image generation
+        # --- New Part: Convert Markdown to HTML and show in a text area ---
+        html_output = markdown.markdown(st.session_state.article)
+
         image_prompt = extract_image_prompt(st.session_state.article)
         alt_text = extract_alt_text(st.session_state.article)
             
