@@ -85,11 +85,15 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
 
 # --- End WordPress Upload Functions ---
 
-# Initialize session state
-if 'generated_image_data' not in st.session_state:
-    st.session_state.generated_image_data = None # This will store BytesIO object
-if 'generated_image_prompt' not in st.session_state:
-    st.session_state.generated_image_prompt = None
+# Initialize session state for the active image to be uploaded
+if 'active_image_bytes_io' not in st.session_state:
+    st.session_state.active_image_bytes_io = None # BytesIO object of processed image
+if 'active_image_alt_text' not in st.session_state:
+    st.session_state.active_image_alt_text = None # Alt text/prompt for the image
+if 'user_uploaded_raw_bytes' not in st.session_state: # Temporary store for user's raw upload
+    st.session_state.user_uploaded_raw_bytes = None
+if 'user_uploaded_alt_text_input' not in st.session_state:
+    st.session_state.user_uploaded_alt_text_input = ""
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -129,6 +133,16 @@ def process_image_for_wordpress(image_bytes, target_width=1200, final_quality=80
         return jpeg_bytes_io
     except Exception as e:
         st.error(f"Error processing image: {e}")
+        # Add diagnostic information
+        if 'image_bytes' in locals() and image_bytes:
+            try:
+                st.caption(f"Debug Info: Input data type: {type(image_bytes)}, Length: {len(image_bytes)}")
+                if isinstance(image_bytes, bytes):
+                    st.caption(f"First 20 bytes (hex): {image_bytes[:20].hex()}")
+                else:
+                    st.caption("Debug Info: Input data is not in bytes format.")
+            except Exception as debug_e:
+                st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
 
 st.title("OpenAI Image Generator & WordPress Uploader")
@@ -138,29 +152,34 @@ if not OPENAI_API_KEY:
 else:
     openai_client = OpenAI()
     with st.form("openai_image_form"):
-        prompt_text = st.text_area("Enter your image prompt (English only):", height=80, key="prompt_input")
+        prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
         submitted = st.form_submit_button("Generate Image")
         
         if submitted and prompt_text.strip():
-            st.session_state.generated_image_data = None # Reset on new generation
-            st.session_state.generated_image_prompt = None
+            # Clear any previous active image data
+            st.session_state.active_image_bytes_io = None
+            st.session_state.active_image_alt_text = None
+            st.session_state.user_uploaded_raw_bytes = None
+            st.session_state.user_uploaded_alt_text_input = ""
+
             with st.spinner("Generating and processing image with OpenAI..."):
                 try:
                     response = openai_client.images.generate(
-                        model="gpt-image-1",
+                        model="gpt-image-1", # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
                         prompt=prompt_text,
                         n=1,
-                        size="1536x1024"
+                        size="1536x1024" # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
                     )
                     if response.data and response.data[0].b64_json:
                         b64_image_data = response.data[0].b64_json
                         image_bytes_from_api = base64.b64decode(b64_image_data)
+                        # Process using existing function, aligning with memory fa413de7-7129-48b8-b00d-67b86f2dc54d
                         final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
                         
                         if final_image_bytes_io:
-                            st.session_state.generated_image_data = final_image_bytes_io
-                            st.session_state.generated_image_prompt = prompt_text
-                            st.image(final_image_bytes_io, caption=prompt_text[:50] + "...")
+                            st.session_state.active_image_bytes_io = final_image_bytes_io
+                            st.session_state.active_image_alt_text = prompt_text
+                            # Display of the image will be handled by the unified section below
                         else:
                             st.error("Failed to process the generated image.")
                     else:
@@ -168,20 +187,49 @@ else:
                 except Exception as e:
                     st.error(f"Failed to generate or process image: {e}")
 
-# --- UI for Download and Upload (Outside the form) ---
-if st.session_state.generated_image_data and st.session_state.generated_image_prompt:
-    st.markdown("---_Upload to WordPress_---")
+# --- Section for Uploading Existing Image ---
+st.markdown("---_Or Upload Your Own Image_---")
+
+with st.form("user_image_upload_form"):
+    uploaded_file = st.file_uploader("Choose an image file", type=['png', 'jpg', 'jpeg', 'webp'])
+    user_alt_text = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
+    process_uploaded_button = st.form_submit_button("Process Uploaded Image")
+
+    if process_uploaded_button and uploaded_file is not None and user_alt_text.strip():
+        st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
+        st.session_state.user_uploaded_alt_text_input = user_alt_text
+        
+        with st.spinner("Processing your uploaded image..."):
+            processed_user_image_io = process_image_for_wordpress(st.session_state.user_uploaded_raw_bytes)
+            if processed_user_image_io:
+                st.session_state.active_image_bytes_io = processed_user_image_io
+                st.session_state.active_image_alt_text = st.session_state.user_uploaded_alt_text_input
+                st.success("Uploaded image processed and ready for WordPress upload.")
+            else:
+                st.error("Failed to process your uploaded image.")
+                st.session_state.active_image_bytes_io = None # Clear if processing failed
+                st.session_state.active_image_alt_text = None
+    elif process_uploaded_button and (uploaded_file is None or not user_alt_text.strip()):
+        st.warning("Please upload an image AND provide alt text before processing.")
+
+# --- UI for Displaying Active Image and Uploading to WordPress ---
+if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_text:
+    st.markdown("---_Active Image for WordPress Upload_---")
     
-    current_prompt = st.session_state.generated_image_prompt
-    image_data_bytesio = st.session_state.generated_image_data # This is a BytesIO object
+    # Display the active image (either AI-generated or user-uploaded and processed)
+    st.session_state.active_image_bytes_io.seek(0) # Ensure BytesIO is ready for display
+    st.image(st.session_state.active_image_bytes_io, caption=st.session_state.active_image_alt_text[:100] + "...")
+
+    current_alt_text = st.session_state.active_image_alt_text
+    image_data_bytesio = st.session_state.active_image_bytes_io # This is a BytesIO object
     
-    # Ensure BytesIO is ready for reading initially
-    image_data_bytesio.seek(0) 
+    # Ensure BytesIO is ready for reading for uploads
+    image_data_bytesio.seek(0)
     
     # Prepare common upload parameters
-    clean_prompt_filename = "".join(c if c.isalnum() or c in (' ', '_') else '' for c in current_prompt[:30]).rstrip().replace(' ', '_')
-    upload_filename = f"{clean_prompt_filename}_processed.jpg" if clean_prompt_filename else "processed_image.jpg"
-    alt_text_for_upload = current_prompt[:100]
+    clean_alt_text_filename = "".join(c if c.isalnum() or c in (' ', '_') else '' for c in current_alt_text[:30]).rstrip().replace(' ', '_')
+    upload_filename = f"{clean_alt_text_filename}_processed.jpg" if clean_alt_text_filename else "processed_image.jpg"
+    alt_text_for_upload = current_alt_text[:100]
 
     # Create columns for buttons
     col1, col2, col3 = st.columns(3)
