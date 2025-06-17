@@ -236,12 +236,21 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     upload_filename = f"{clean_alt_text_filename}_processed.jpg" if clean_alt_text_filename else "processed_image.jpg"
     alt_text_for_upload = current_alt_text[:100]
 
-    # Create columns for buttons
-    col1, col2, col3, col4 = st.columns(4)
+    # Debug information to show available configurations
+    available_configs = [site for site, config in WP_SITES.items() if all(config.get(k) for k in ["url", "username", "password"])]
+    st.caption(f"Debug - Available configs: {available_configs}")
 
-    # Button for Cryptonews
-    with col1:
-        if st.button("Upload to Cryptonews", key="upload_cryptonews"):
+    # Change button layout to use horizontal containers instead
+    st.write("Upload to:")
+    
+    # Create two rows of buttons instead of four columns
+    row1_col1, row1_col2 = st.columns(2)
+    row2_col1, row2_col2 = st.columns(2)
+    
+    # Row 1 - Cryptonews and CryptoDnes (with CryptoDnes given priority placement)
+    with row1_col1:
+        # Button for Cryptonews
+        if st.button("Upload to Cryptonews", key="upload_cryptonews", use_container_width=True):
             site_key = "cryptonews"
             site_config = WP_SITES.get(site_key)
             if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
@@ -260,9 +269,12 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
 
-    # Button for CryptoDnes
-    with col2:
-        if st.button("Upload to CryptoDnes", key="upload_cryptodnes"):
+    # Standalone button for CryptoDnes to ensure it appears
+    st.button("Upload to CryptoDnes (Standalone)", key="upload_cryptodnes_standalone")
+    
+    with row1_col2:
+        # Button for CryptoDnes
+        if st.button("Upload to CryptoDnes", key="upload_cryptodnes", use_container_width=True):
             site_key = "cryptodnes"
             site_config = WP_SITES.get(site_key)
             if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
@@ -280,10 +292,11 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
                     )
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
-
-    # Button for ICOBench
-    with col3:
-        if st.button("Upload to ICOBench", key="upload_icobench"):
+    
+    # Row 2 - ICOBench and Bitcoinist
+    with row2_col1:
+        # Button for ICOBench
+        if st.button("Upload to ICOBench", key="upload_icobench", use_container_width=True):
             site_key = "icobench"
             site_config = WP_SITES.get(site_key)
             if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
@@ -302,9 +315,9 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
 
-    # Button for Bitcoinist
-    with col4:
-        if st.button("Upload to Bitcoinist", key="upload_bitcoinist"):
+    with row2_col2:
+        # Button for Bitcoinist
+        if st.button("Upload to Bitcoinist", key="upload_bitcoinist", use_container_width=True):
             site_key = "bitcoinist"
             site_config = WP_SITES.get(site_key)
             if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
