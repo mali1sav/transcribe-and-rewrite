@@ -236,18 +236,11 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     upload_filename = f"{clean_alt_text_filename}_processed.jpg" if clean_alt_text_filename else "processed_image.jpg"
     alt_text_for_upload = current_alt_text[:100]
 
-    # Debug information to show available configurations
-    available_configs = [site for site, config in WP_SITES.items() if all(config.get(k) for k in ["url", "username", "password"])]
-    st.caption(f"Debug - Available configs: {available_configs}")
-
-    # Change button layout to use horizontal containers instead
-    st.write("Upload to:")
-    
-    # Create two rows of buttons instead of four columns
+    # Create two rows of buttons with two columns each
     row1_col1, row1_col2 = st.columns(2)
     row2_col1, row2_col2 = st.columns(2)
     
-    # Row 1 - Cryptonews and CryptoDnes (with CryptoDnes given priority placement)
+    # Row 1 - Cryptonews and CryptoDnes
     with row1_col1:
         # Button for Cryptonews
         if st.button("Upload to Cryptonews", key="upload_cryptonews", use_container_width=True):
@@ -269,8 +262,6 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
 
-    # Standalone button for CryptoDnes to ensure it appears
-    st.button("Upload to CryptoDnes (Standalone)", key="upload_cryptodnes_standalone")
     
     with row1_col2:
         # Button for CryptoDnes
