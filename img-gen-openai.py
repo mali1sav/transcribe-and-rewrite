@@ -104,6 +104,11 @@ WP_SITES = {
         "username": os.getenv("CRYPTONEWS_WP_USERNAME"),
         "password": os.getenv("CRYPTONEWS_WP_APP_PASSWORD")
     },
+    "cryptodnes": {
+        "url": os.getenv("CRYPTODNES_WP_URL"),
+        "username": os.getenv("CRYPTODNES_WP_USERNAME"),
+        "password": os.getenv("CRYPTODNES_WP_APP_PASSWORD")
+    },
     "icobench": {
         "url": os.getenv("ICOBENCH_WP_URL"),
         "username": os.getenv("ICOBENCH_WP_USERNAME"),
@@ -232,7 +237,7 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     alt_text_for_upload = current_alt_text[:100]
 
     # Create columns for buttons
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
 
     # Button for Cryptonews
     with col1:
@@ -255,8 +260,29 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
 
-    # Button for ICOBench
+    # Button for CryptoDnes
     with col2:
+        if st.button("Upload to CryptoDnes", key="upload_cryptodnes"):
+            site_key = "cryptodnes"
+            site_config = WP_SITES.get(site_key)
+            if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
+                st.markdown(f"**Uploading to {site_key}...**")
+                image_data_bytesio.seek(0) # Rewind for this upload
+                upload_image_bytes = image_data_bytesio.getvalue()
+                with st.spinner(f"Uploading to {site_key}..."):
+                    upload_image_to_wordpress(
+                        image_bytes=upload_image_bytes,
+                        wp_url=site_config["url"],
+                        username=site_config["username"],
+                        wp_app_password=site_config["password"],
+                        filename=upload_filename,
+                        alt_text=alt_text_for_upload
+                    )
+            else:
+                st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+
+    # Button for ICOBench
+    with col3:
         if st.button("Upload to ICOBench", key="upload_icobench"):
             site_key = "icobench"
             site_config = WP_SITES.get(site_key)
@@ -277,7 +303,7 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
 
     # Button for Bitcoinist
-    with col3:
+    with col4:
         if st.button("Upload to Bitcoinist", key="upload_bitcoinist"):
             site_key = "bitcoinist"
             site_config = WP_SITES.get(site_key)
