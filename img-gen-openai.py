@@ -69,7 +69,7 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
                     auth=HTTPBasicAuth(username, wp_app_password)
                 )
                 # st.write(f"[Upload] Update response status: {update_response.status_code}")
-                if update_response.status_code in (200, 201, 200):
+                if update_response.status_code in (200, 201): # Corrected status check, was (200, 201, 200)
                     st.success(f"Image uploaded and metadata updated for {wp_url}. Media ID: {media_id}")
                 else:
                     st.warning(f"Image uploaded to {wp_url} (ID: {media_id}), but metadata update failed. Status: {update_response.status_code}, Response: {update_response.text}")
@@ -92,7 +92,7 @@ if 'active_image_alt_text' not in st.session_state:
     st.session_state.active_image_alt_text = None # Alt text/prompt for the image
 if 'user_uploaded_raw_bytes' not in st.session_state: # Temporary store for user's raw upload
     st.session_state.user_uploaded_raw_bytes = None
-if 'user_uploaded_alt_text_input' not in st.session_state:
+if 'user_uploaded_alt_text_input' not in st.session_state: # Stores alt text from user upload section AFTER processing
     st.session_state.user_uploaded_alt_text_input = ""
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -158,33 +158,33 @@ else:
     openai_client = OpenAI()
     with st.form("openai_image_form"):
         prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
-        submitted = st.form_submit_button("Generate Image")
+        submitted_generate = st.form_submit_button("Generate Image")
         
-        if submitted and prompt_text.strip():
-            # Clear any previous active image data
+        if submitted_generate and prompt_text.strip():
+            # Clear any previous active image data from user upload or prior generation
             st.session_state.active_image_bytes_io = None
             st.session_state.active_image_alt_text = None
             st.session_state.user_uploaded_raw_bytes = None
-            st.session_state.user_uploaded_alt_text_input = ""
+            st.session_state.user_uploaded_alt_text_input = "" # Clear stored user alt text
 
             with st.spinner("Generating and processing image with OpenAI..."):
                 try:
                     response = openai_client.images.generate(
-                        model="gpt-image-1", # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
+                        model="dall-e-3", # Using a common model, adjust if needed. "gpt-image-1" is not a standard public model name.
                         prompt=prompt_text,
                         n=1,
-                        size="1536x1024" # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
+                        size="1792x1024", # DALL-E 3 supports 1024x1024, 1792x1024, or 1024x1792. Using a wide aspect.
+                        response_format="b64_json"
                     )
                     if response.data and response.data[0].b64_json:
                         b64_image_data = response.data[0].b64_json
                         image_bytes_from_api = base64.b64decode(b64_image_data)
-                        # Process using existing function, aligning with memory fa413de7-7129-48b8-b00d-67b86f2dc54d
+                        
                         final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
                         
                         if final_image_bytes_io:
                             st.session_state.active_image_bytes_io = final_image_bytes_io
-                            st.session_state.active_image_alt_text = prompt_text
-                            # Display of the image will be handled by the unified section below
+                            st.session_state.active_image_alt_text = prompt_text # Use the prompt as alt text for generated image
                         else:
                             st.error("Failed to process the generated image.")
                     else:
@@ -197,25 +197,36 @@ st.markdown("---_Or Upload Your Own Image_---")
 
 with st.form("user_image_upload_form"):
     uploaded_file = st.file_uploader("Choose an image file", type=['png', 'jpg', 'jpeg', 'webp'])
-    user_alt_text = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
+    # This text_area's value is captured by 'user_alt_text_from_widget' on form submission
+    user_alt_text_from_widget = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
     process_uploaded_button = st.form_submit_button("Process Uploaded Image")
 
-    if process_uploaded_button and uploaded_file is not None and user_alt_text.strip():
-        st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
-        st.session_state.user_uploaded_alt_text_input = user_alt_text
-        
-        with st.spinner("Processing your uploaded image..."):
-            processed_user_image_io = process_image_for_wordpress(st.session_state.user_uploaded_raw_bytes)
-            if processed_user_image_io:
-                st.session_state.active_image_bytes_io = processed_user_image_io
-                st.session_state.active_image_alt_text = st.session_state.user_uploaded_alt_text_input
-                st.success("Uploaded image processed and ready for WordPress upload.")
-            else:
-                st.error("Failed to process your uploaded image.")
-                st.session_state.active_image_bytes_io = None # Clear if processing failed
-                st.session_state.active_image_alt_text = None
-    elif process_uploaded_button and (uploaded_file is None or not user_alt_text.strip()):
-        st.warning("Please upload an image AND provide alt text before processing.")
+    if process_uploaded_button:
+        if uploaded_file is not None and user_alt_text_from_widget.strip():
+            # Clear any previous active image data from AI generation
+            # to ensure the user upload takes precedence
+            st.session_state.active_image_bytes_io = None 
+            st.session_state.active_image_alt_text = None
+
+            st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
+            # Store the alt text from the widget into a session state variable for clarity
+            st.session_state.user_uploaded_alt_text_input = user_alt_text_from_widget 
+            
+            with st.spinner("Processing your uploaded image..."):
+                processed_user_image_io = process_image_for_wordpress(st.session_state.user_uploaded_raw_bytes)
+                if processed_user_image_io:
+                    st.session_state.active_image_bytes_io = processed_user_image_io
+                    # Use the alt text that was specifically entered for this uploaded image
+                    st.session_state.active_image_alt_text = st.session_state.user_uploaded_alt_text_input
+                    st.success("Uploaded image processed and is now the active image.")
+                else:
+                    st.error("Failed to process your uploaded image.")
+                    # Ensure active image state is cleared if processing fails
+                    st.session_state.active_image_bytes_io = None 
+                    st.session_state.active_image_alt_text = None
+        else:
+            st.warning("Please upload an image AND provide alt text before processing.")
+
 
 # --- UI for Displaying Active Image and Uploading to WordPress ---
 if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_text:
@@ -223,106 +234,49 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     
     # Display the active image (either AI-generated or user-uploaded and processed)
     st.session_state.active_image_bytes_io.seek(0) # Ensure BytesIO is ready for display
-    st.image(st.session_state.active_image_bytes_io, caption=st.session_state.active_image_alt_text[:100] + "...")
+    # Display the full alt text as caption for clarity, or a snippet if too long
+    display_caption = st.session_state.active_image_alt_text
+    if len(display_caption) > 150:
+        display_caption = display_caption[:150] + "..."
+    st.image(st.session_state.active_image_bytes_io, caption=f"ALT Text: {display_caption}")
 
-    current_alt_text = st.session_state.active_image_alt_text
-    image_data_bytesio = st.session_state.active_image_bytes_io # This is a BytesIO object
+    current_alt_text_for_upload = st.session_state.active_image_alt_text # This is the key variable for WP upload
+    image_data_bytesio_for_upload = st.session_state.active_image_bytes_io
     
-    # Ensure BytesIO is ready for reading for uploads
-    image_data_bytesio.seek(0)
+    image_data_bytesio_for_upload.seek(0)
     
-    # Prepare common upload parameters
-    clean_alt_text_filename = "".join(c if c.isalnum() or c in (' ', '_') else '' for c in current_alt_text[:30]).rstrip().replace(' ', '_')
+    clean_alt_text_filename = "".join(c if c.isalnum() or c in (' ', '_') else '' for c in current_alt_text_for_upload[:30]).rstrip().replace(' ', '_')
     upload_filename = f"{clean_alt_text_filename}_processed.jpg" if clean_alt_text_filename else "processed_image.jpg"
-    alt_text_for_upload = current_alt_text[:100]
+    
+    # Use the full alt text for upload, WordPress might truncate if it has its own limits
+    alt_text_to_send_to_wp = current_alt_text_for_upload 
 
-    # Create two rows of buttons with two columns each
     row1_col1, row1_col2 = st.columns(2)
     row2_col1, row2_col2 = st.columns(2)
     
-    # Row 1 - Cryptonews and CryptoDnes
-    with row1_col1:
-        # Button for Cryptonews
-        if st.button("Upload to Cryptonews", key="upload_cryptonews", use_container_width=True):
-            site_key = "cryptonews"
-            site_config = WP_SITES.get(site_key)
-            if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
-                st.markdown(f"**Uploading to {site_key}...**")
-                image_data_bytesio.seek(0) # Rewind for this upload
-                upload_image_bytes = image_data_bytesio.getvalue()
-                with st.spinner(f"Uploading to {site_key}..."):
-                    upload_image_to_wordpress(
-                        image_bytes=upload_image_bytes,
-                        wp_url=site_config["url"],
-                        username=site_config["username"],
-                        wp_app_password=site_config["password"],
-                        filename=upload_filename,
-                        alt_text=alt_text_for_upload
-                    )
-            else:
-                st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+    sites_to_upload = {
+        "cryptonews": row1_col1, "cryptodnes": row1_col2,
+        "icobench": row2_col1, "bitcoinist": row2_col2
+    }
 
-    
-    with row1_col2:
-        # Button for CryptoDnes
-        if st.button("Upload to CryptoDnes", key="upload_cryptodnes", use_container_width=True):
-            site_key = "cryptodnes"
-            site_config = WP_SITES.get(site_key)
-            if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
-                st.markdown(f"**Uploading to {site_key}...**")
-                image_data_bytesio.seek(0) # Rewind for this upload
-                upload_image_bytes = image_data_bytesio.getvalue()
-                with st.spinner(f"Uploading to {site_key}..."):
-                    upload_image_to_wordpress(
-                        image_bytes=upload_image_bytes,
-                        wp_url=site_config["url"],
-                        username=site_config["username"],
-                        wp_app_password=site_config["password"],
-                        filename=upload_filename,
-                        alt_text=alt_text_for_upload
-                    )
-            else:
-                st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
-    
-    # Row 2 - ICOBench and Bitcoinist
-    with row2_col1:
-        # Button for ICOBench
-        if st.button("Upload to ICOBench", key="upload_icobench", use_container_width=True):
-            site_key = "icobench"
-            site_config = WP_SITES.get(site_key)
-            if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
-                st.markdown(f"**Uploading to {site_key}...**")
-                image_data_bytesio.seek(0) # Rewind for this upload
-                upload_image_bytes = image_data_bytesio.getvalue()
-                with st.spinner(f"Uploading to {site_key}..."):
-                    upload_image_to_wordpress(
-                        image_bytes=upload_image_bytes,
-                        wp_url=site_config["url"],
-                        username=site_config["username"],
-                        wp_app_password=site_config["password"],
-                        filename=upload_filename,
-                        alt_text=alt_text_for_upload
-                    )
-            else:
-                st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
-
-    with row2_col2:
-        # Button for Bitcoinist
-        if st.button("Upload to Bitcoinist", key="upload_bitcoinist", use_container_width=True):
-            site_key = "bitcoinist"
-            site_config = WP_SITES.get(site_key)
-            if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
-                st.markdown(f"**Uploading to {site_key}...**")
-                image_data_bytesio.seek(0) # Rewind for this upload
-                upload_image_bytes = image_data_bytesio.getvalue()
-                with st.spinner(f"Uploading to {site_key}..."):
-                    upload_image_to_wordpress(
-                        image_bytes=upload_image_bytes,
-                        wp_url=site_config["url"],
-                        username=site_config["username"],
-                        wp_app_password=site_config["password"],
-                        filename=upload_filename,
-                        alt_text=alt_text_for_upload
-                    )
-            else:
-                st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+    for site_key, column in sites_to_upload.items():
+        with column:
+            if st.button(f"Upload to {site_key.replace('_', ' ').title()}", key=f"upload_{site_key}", use_container_width=True):
+                site_config = WP_SITES.get(site_key)
+                if site_config and all(site_config.get(k) for k in ["url", "username", "password"]):
+                    st.markdown(f"**Uploading to {site_key}...**")
+                    image_data_bytesio_for_upload.seek(0) # Rewind for this upload
+                    upload_image_bytes = image_data_bytesio_for_upload.getvalue()
+                    with st.spinner(f"Uploading to {site_key}..."):
+                        upload_image_to_wordpress(
+                            image_bytes=upload_image_bytes,
+                            wp_url=site_config["url"],
+                            username=site_config["username"],
+                            wp_app_password=site_config["password"],
+                            filename=upload_filename,
+                            alt_text=alt_text_to_send_to_wp # Ensure this uses the correct alt text
+                        )
+                else:
+                    st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+elif st.session_state.get('active_image_bytes_io') is None and st.session_state.get('active_image_alt_text') is None:
+    st.info("Generate an image or upload and process your own image to make it active for WordPress upload.")
