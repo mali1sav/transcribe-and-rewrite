@@ -219,9 +219,10 @@ else:
     openai_client = OpenAI()
     with st.form("openai_image_form"):
         prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
+        ai_alt_text = st.text_area("Enter alt text for the generated image:", height=80, key="ai_alt_text_input")
         submitted = st.form_submit_button("Generate Image")
         
-        if submitted and prompt_text.strip():
+        if submitted and prompt_text.strip() and ai_alt_text.strip():
             # Clear any previous active image data
             st.session_state.active_image_bytes_io = None
             st.session_state.active_image_alt_text = None
@@ -244,7 +245,7 @@ else:
                         
                         if final_image_bytes_io:
                             st.session_state.active_image_bytes_io = final_image_bytes_io
-                            st.session_state.active_image_alt_text = prompt_text
+                            st.session_state.active_image_alt_text = ai_alt_text  # Use the dedicated alt text instead of prompt
                             # Display of the image will be handled by the unified section below
                         else:
                             st.error("Failed to process the generated image.")
@@ -252,6 +253,8 @@ else:
                         st.error("No image data received from OpenAI.")
                 except Exception as e:
                     st.error(f"Failed to generate or process image: {e}")
+        elif submitted and (not prompt_text.strip() or not ai_alt_text.strip()):
+            st.warning("Please provide both an image prompt AND alt text before generating.")
 
 # --- Section for Uploading Existing Image ---
 st.markdown("---_Or Upload Your Own Image_---")
