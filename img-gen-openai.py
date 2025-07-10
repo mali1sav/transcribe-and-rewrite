@@ -7,6 +7,7 @@ from PIL import Image
 from openai import OpenAI
 import requests
 from requests.auth import HTTPBasicAuth
+import json
 
 # Load environment variables from .env file
 load_dotenv()
@@ -96,6 +97,7 @@ if 'user_uploaded_alt_text_input' not in st.session_state:
     st.session_state.user_uploaded_alt_text_input = ""
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 
 # WordPress Site Configurations
 WP_SITES = {
@@ -211,50 +213,200 @@ def process_image_for_wordpress(image_bytes, final_quality=80):
                 st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
 
-st.title("OpenAI Image Generator & WordPress Uploader")
+def generate_image_together_ai(prompt, width=1792, height=1024):
+    """
+    Generate image using Together AI's Flux model.
+    Returns image bytes or None if failed.
+    """
+    try:
+        url = "https://api.together.xyz/v1/images/generations"
+        
+        headers = {
+            "Authorization": f"Bearer {TOGETHER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "black-forest-labs/FLUX.1-schnell-Free",
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "steps": 4,  # Schnell model works well with 4 steps
+            "n": 1,
+            "response_format": "b64_json"
+        }
+        
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("data") and len(result["data"]) > 0:
+                b64_image = result["data"][0].get("b64_json")
+                if b64_image:
+                    return base64.b64decode(b64_image)
+            st.error("No image data received from Together AI")
+            return None
+        else:
+            st.error(f"Together AI API error: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error calling Together AI API: {e}")
+        return None
 
-if not OPENAI_API_KEY:
-    st.error("OpenAI API key not found. Please set OPENAI_API_KEY in .env")
-else:
-    openai_client = OpenAI()
-    with st.form("openai_image_form"):
+# Initialize session state for provider selection and retry functionality
+if 'current_prompt' not in st.session_state:
+    st.session_state.current_prompt = ""
+if 'current_alt_text' not in st.session_state:
+    st.session_state.current_alt_text = ""
+if 'current_blockchain_bg' not in st.session_state:
+    st.session_state.current_blockchain_bg = False
+if 'last_used_provider' not in st.session_state:
+    st.session_state.last_used_provider = None
+
+st.title("AI Image Generator & WordPress Uploader")
+
+# Check API key availability
+together_available = bool(TOGETHER_API_KEY)
+openai_available = bool(OPENAI_API_KEY)
+
+if not together_available and not openai_available:
+    st.error("No API keys found. Please set TOGETHER_API_KEY and/or OPENAI_API_KEY in .env")
+elif not together_available:
+    st.warning("Together AI API key not found. Only OpenAI will be available.")
+elif not openai_available:
+    st.warning("OpenAI API key not found. Only Together AI will be available.")
+
+if together_available or openai_available:
+    # Initialize OpenAI client if available
+    openai_client = OpenAI() if openai_available else None
+    
+    with st.form("ai_image_form"):
         prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
         ai_alt_text = st.text_area("Enter alt text for the generated image:", height=80, key="ai_alt_text_input")
+        
+        # Add checkbox for blockchain background enhancement
+        add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
+        
+        # Provider selection - default to Together AI if available (free option)
+        if together_available and openai_available:
+            provider = st.radio(
+                "Choose AI Provider:",
+                ["Together AI (Free - Flux Model)", "OpenAI (Premium - DALL-E)"],
+                index=0,  # Default to free option
+                key="provider_selection"
+            )
+        elif together_available:
+            provider = "Together AI (Free - Flux Model)"
+            st.info("Using Together AI (Free)")
+        else:
+            provider = "OpenAI (Premium - DALL-E)"
+            st.info("Using OpenAI (Premium)")
+        
         submitted = st.form_submit_button("Generate Image")
         
         if submitted and prompt_text.strip() and ai_alt_text.strip():
+            # Store current inputs for potential retry
+            st.session_state.current_prompt = prompt_text
+            st.session_state.current_alt_text = ai_alt_text
+            st.session_state.current_blockchain_bg = add_blockchain_bg
+            
             # Clear any previous active image data
             st.session_state.active_image_bytes_io = None
             st.session_state.active_image_alt_text = None
             st.session_state.user_uploaded_raw_bytes = None
             st.session_state.user_uploaded_alt_text_input = ""
 
-            with st.spinner("Generating and processing image with OpenAI..."):
-                try:
-                    response = openai_client.images.generate(
-                        model="gpt-image-1", # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
-                        prompt=prompt_text,
-                        n=1,
-                        size="1536x1024" # As per memory fa413de7-7129-48b8-b00d-67b86f2dc54d
-                    )
-                    if response.data and response.data[0].b64_json:
-                        b64_image_data = response.data[0].b64_json
-                        image_bytes_from_api = base64.b64decode(b64_image_data)
-                        # Process using existing function, aligning with memory fa413de7-7129-48b8-b00d-67b86f2dc54d
+            # Enhance prompt with blockchain background if checkbox is selected
+            final_prompt = prompt_text
+            if add_blockchain_bg:
+                final_prompt = f"{prompt_text.rstrip('.')}. The background is futuristic glowing blockchain."
+
+            # Generate image based on selected provider
+            if "Together AI" in provider and together_available:
+                st.session_state.last_used_provider = "Together AI"
+                with st.spinner("Generating image with Together AI (Free)..."):
+                    image_bytes_from_api = generate_image_together_ai(final_prompt)
+                    
+                    if image_bytes_from_api:
                         final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
                         
                         if final_image_bytes_io:
                             st.session_state.active_image_bytes_io = final_image_bytes_io
-                            st.session_state.active_image_alt_text = ai_alt_text  # Use the dedicated alt text instead of prompt
-                            # Display of the image will be handled by the unified section below
+                            st.session_state.active_image_alt_text = ai_alt_text
+                            st.success("✅ Image generated successfully with Together AI (Free)")
                         else:
                             st.error("Failed to process the generated image.")
                     else:
-                        st.error("No image data received from OpenAI.")
-                except Exception as e:
-                    st.error(f"Failed to generate or process image: {e}")
+                        st.error("Failed to generate image with Together AI.")
+                        
+            elif "OpenAI" in provider and openai_available:
+                st.session_state.last_used_provider = "OpenAI"
+                with st.spinner("Generating image with OpenAI (Premium)..."):
+                    try:
+                        response = openai_client.images.generate(
+                            model="gpt-image-1",
+                            prompt=final_prompt,
+                            n=1,
+                            size="1792x1024"
+                        )
+                        if response.data and response.data[0].b64_json:
+                            b64_image_data = response.data[0].b64_json
+                            image_bytes_from_api = base64.b64decode(b64_image_data)
+                            final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
+                            
+                            if final_image_bytes_io:
+                                st.session_state.active_image_bytes_io = final_image_bytes_io
+                                st.session_state.active_image_alt_text = ai_alt_text
+                                st.success("✅ Image generated successfully with OpenAI (Premium)")
+                            else:
+                                st.error("Failed to process the generated image.")
+                        else:
+                            st.error("No image data received from OpenAI.")
+                    except Exception as e:
+                        st.error(f"Failed to generate image with OpenAI: {e}")
+                        
         elif submitted and (not prompt_text.strip() or not ai_alt_text.strip()):
             st.warning("Please provide both an image prompt AND alt text before generating.")
+
+# Add retry functionality with alternative provider
+if (st.session_state.active_image_bytes_io and st.session_state.active_image_alt_text and 
+    st.session_state.current_prompt and together_available and openai_available):
+    
+    # Show retry option only if both providers are available and user hasn't used both yet
+    if st.session_state.last_used_provider == "Together AI":
+        st.markdown("---")
+        st.markdown("**Not satisfied with the result?**")
+        if st.button("🔄 Try with OpenAI (Premium) instead", key="retry_openai"):
+            final_prompt = st.session_state.current_prompt
+            if st.session_state.current_blockchain_bg:
+                final_prompt = f"{st.session_state.current_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
+            
+            with st.spinner("Regenerating with OpenAI (Premium)..."):
+                try:
+                    response = openai_client.images.generate(
+                        model="gpt-image-1",
+                        prompt=final_prompt,
+                        n=1,
+                        size="1792x1024"
+                    )
+                    if response.data and response.data[0].b64_json:
+                        b64_image_data = response.data[0].b64_json
+                        image_bytes_from_api = base64.b64decode(b64_image_data)
+                        final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
+                        
+                        if final_image_bytes_io:
+                            st.session_state.active_image_bytes_io = final_image_bytes_io
+                            st.session_state.active_image_alt_text = st.session_state.current_alt_text
+                            st.session_state.last_used_provider = "OpenAI"
+                            st.success("✅ New image generated with OpenAI (Premium)")
+                            st.rerun()
+                        else:
+                            st.error("Failed to process the regenerated image.")
+                    else:
+                        st.error("No image data received from OpenAI.")
+                except Exception as e:
+                    st.error(f"Failed to regenerate image with OpenAI: {e}")
 
 # --- Section for Uploading Existing Image ---
 st.markdown("---_Or Upload Your Own Image_---")
