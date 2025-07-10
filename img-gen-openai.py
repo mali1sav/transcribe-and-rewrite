@@ -292,7 +292,7 @@ if together_available or openai_available:
         if together_available and openai_available:
             provider = st.radio(
                 "Choose AI Provider:",
-                ["Together AI (Free - Flux Model)", "OpenAI (Premium - DALL-E)"],
+                ["Together AI (Free - Flux Model)", "OpenAI (Premium - GPT Image)"],
                 index=0,  # Default to free option
                 key="provider_selection"
             )
@@ -300,8 +300,8 @@ if together_available or openai_available:
             provider = "Together AI (Free - Flux Model)"
             st.info("Using Together AI (Free)")
         else:
-            provider = "OpenAI (Premium - DALL-E)"
-            st.info("Using OpenAI (Premium)")
+            provider = "OpenAI (Premium - GPT Image)"
+            st.info("Using OpenAI (Premium - GPT Image)")
         
         submitted = st.form_submit_button("Generate Image")
         
@@ -348,7 +348,7 @@ if together_available or openai_available:
                             model="gpt-image-1",
                             prompt=final_prompt,
                             n=1,
-                            size="1792x1024"
+                            size="1536x1024"
                         )
                         if response.data and response.data[0].b64_json:
                             b64_image_data = response.data[0].b64_json
@@ -388,7 +388,7 @@ if (st.session_state.active_image_bytes_io and st.session_state.active_image_alt
                         model="gpt-image-1",
                         prompt=final_prompt,
                         n=1,
-                        size="1792x1024"
+                        size="1536x1024"
                     )
                     if response.data and response.data[0].b64_json:
                         b64_image_data = response.data[0].b64_json
