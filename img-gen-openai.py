@@ -34,7 +34,7 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
         # WordPress uses the 'title' field from the file upload for the media item's title,
         # and 'alt_text' can be set in the 'data' payload for some setups, or updated later.
         # For robust alt text, it's often better to update post-upload.
-        data_payload = {'alt_text': alt_text, 'title': alt_text, 'caption': alt_text} 
+        data_payload = {'alt_text': alt_text, 'title': alt_text} 
 
         response = requests.post(
             media_endpoint, 
@@ -58,8 +58,7 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
                 update_payload['alt_text'] = alt_text
             if alt_text and media_data.get('title', {}).get('raw') != alt_text: # Title is an object
                  update_payload['title'] = alt_text 
-            if alt_text and media_data.get('caption', {}).get('raw') != alt_text: # Caption is an object
-                 update_payload['caption'] = alt_text
+            # Leave caption empty as requested
 
             if update_payload: # Only PATCH if there's something to update
                 update_endpoint = f"{media_endpoint}/{media_id}"
@@ -261,6 +260,8 @@ if 'current_alt_text' not in st.session_state:
     st.session_state.current_alt_text = ""
 if 'current_blockchain_bg' not in st.session_state:
     st.session_state.current_blockchain_bg = False
+if 'current_hdr_grading' not in st.session_state:
+    st.session_state.current_hdr_grading = False
 if 'last_used_provider' not in st.session_state:
     st.session_state.last_used_provider = None
 
@@ -285,8 +286,9 @@ if together_available or openai_available:
         prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
         ai_alt_text = st.text_area("Enter alt text for the generated image:", height=80, key="ai_alt_text_input")
         
-        # Add checkbox for blockchain background enhancement
+        # Add checkboxes for image enhancement options
         add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
+        add_hdr_grading = st.checkbox("High dynamic range with vivid and rich color grading", key="hdr_grading_checkbox")
         
         # Provider selection - default to Together AI if available (free option)
         if together_available and openai_available:
@@ -310,6 +312,7 @@ if together_available or openai_available:
             st.session_state.current_prompt = prompt_text
             st.session_state.current_alt_text = ai_alt_text
             st.session_state.current_blockchain_bg = add_blockchain_bg
+            st.session_state.current_hdr_grading = add_hdr_grading
             
             # Clear any previous active image data
             st.session_state.active_image_bytes_io = None
@@ -317,10 +320,12 @@ if together_available or openai_available:
             st.session_state.user_uploaded_raw_bytes = None
             st.session_state.user_uploaded_alt_text_input = ""
 
-            # Enhance prompt with blockchain background if checkbox is selected
+            # Enhance prompt with selected options
             final_prompt = prompt_text
             if add_blockchain_bg:
-                final_prompt = f"{prompt_text.rstrip('.')}. The background is futuristic glowing blockchain."
+                final_prompt = f"{final_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
+            if add_hdr_grading:
+                final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
 
             # Generate image based on selected provider
             if "Together AI" in provider and together_available:
@@ -380,7 +385,9 @@ if (st.session_state.active_image_bytes_io and st.session_state.active_image_alt
         if st.button("🔄 Try with OpenAI (Premium) instead", key="retry_openai"):
             final_prompt = st.session_state.current_prompt
             if st.session_state.current_blockchain_bg:
-                final_prompt = f"{st.session_state.current_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
+                final_prompt = f"{final_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
+            if st.session_state.current_hdr_grading:
+                final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
             
             with st.spinner("Regenerating with OpenAI (Premium)..."):
                 try:
@@ -448,8 +455,38 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     image_data_bytesio.seek(0)
     
     # Prepare common upload parameters
-    clean_alt_text_filename = "".join(c if c.isalnum() or c in (' ', '_') else '' for c in current_alt_text[:30]).rstrip().replace(' ', '_')
-    upload_filename = f"{clean_alt_text_filename}_processed.jpg" if clean_alt_text_filename else "processed_image.jpg"
+    # Generate English filename based on common crypto/blockchain terms instead of using Thai alt text
+    import re
+    import time
+    
+    def generate_english_filename(alt_text):
+        """Generate English filename from alt text, focusing on crypto/blockchain terms"""
+        # Common English crypto terms to extract
+        crypto_terms = [
+            'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'blockchain', 'defi', 'nft', 
+            'trading', 'price', 'market', 'coin', 'token', 'altcoin', 'bull', 'bear',
+            'pump', 'dump', 'moon', 'hodl', 'analysis', 'chart', 'technical', 'news'
+        ]
+        
+        # Extract English words and crypto terms
+        english_words = re.findall(r'[a-zA-Z]+', alt_text.lower())
+        relevant_words = []
+        
+        for word in english_words:
+            if len(word) > 2:  # Skip very short words
+                relevant_words.append(word)
+            if len(relevant_words) >= 3:  # Limit to 3 words
+                break
+        
+        if relevant_words:
+            filename_base = '_'.join(relevant_words[:3])
+        else:
+            # Fallback to generic crypto-related filename
+            filename_base = f"crypto_image_{int(time.time())}"
+        
+        return f"{filename_base}_processed.jpg"
+    
+    upload_filename = generate_english_filename(current_alt_text)
     alt_text_for_upload = current_alt_text[:100]
 
     # Create two rows of buttons with two columns each
