@@ -8,6 +8,7 @@ from openai import OpenAI
 import requests
 from requests.auth import HTTPBasicAuth
 import json
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -283,29 +284,47 @@ if together_available or openai_available:
     openai_client = OpenAI() if openai_available else None
     
     with st.form("ai_image_form"):
-        prompt_text = st.text_area("Enter your image prompt (English only).", height=80, key="prompt_input")
-        ai_alt_text = st.text_area("Enter alt text for the generated image:", height=80, key="ai_alt_text_input")
-        
-        # Add checkboxes for image enhancement options
-        add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
-        add_hdr_grading = st.checkbox("High dynamic range with vivid and rich color grading", key="hdr_grading_checkbox")
-        
-        # Provider selection - default to Together AI if available (free option)
-        if together_available and openai_available:
-            provider = st.radio(
-                "Choose AI Provider:",
-                ["Together AI (Free - Flux Model)", "OpenAI (Premium - GPT Image)"],
-                index=0,  # Default to free option
-                key="provider_selection"
+        col_left, col_right = st.columns([3, 2])
+
+        with col_left:
+            prompt_text = st.text_area("Enter your image prompt (English only).", height=140, key="prompt_input")
+            ai_alt_text = st.text_area("Enter alt text for the generated image:", height=120, key="ai_alt_text_input")
+
+        with col_right:
+            # Add checkboxes for image enhancement options
+            add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
+            add_hdr_grading = st.checkbox("High dynamic range with vivid and rich color grading", key="hdr_grading_checkbox")
+            # Prefix and background/color scheme options
+            add_visually_striking_prefix = st.checkbox("Start with 'A visually striking image of...'", value=True, key="visually_striking_checkbox")
+            bg_option = st.selectbox(
+                "Background / Color Scheme (site presets)",
+                [
+                    "None",
+                    "CryptoNews (Bitberry)",
+                    "ICOBench (Green)",
+                    "CryptoDnes (Gold)",
+                    "Bitcoinist (Blue)",
+                ],
+                index=0,
+                key="background_scheme_select"
             )
-        elif together_available:
-            provider = "Together AI (Free - Flux Model)"
-            st.info("Using Together AI (Free)")
-        else:
-            provider = "OpenAI (Premium - GPT Image)"
-            st.info("Using OpenAI (Premium - GPT Image)")
-        
-        submitted = st.form_submit_button("Generate Image")
+
+            # Provider selection - default to Together AI if available (free option)
+            if together_available and openai_available:
+                provider = st.radio(
+                    "Choose AI Provider:",
+                    ["Together AI (Free - Flux Model)", "OpenAI (Premium - GPT Image)"],
+                    index=0,  # Default to free option
+                    key="provider_selection"
+                )
+            elif together_available:
+                provider = "Together AI (Free - Flux Model)"
+                st.info("Using Together AI (Free)")
+            else:
+                provider = "OpenAI (Premium - GPT Image)"
+                st.info("Using OpenAI (Premium - GPT Image)")
+
+            submitted = st.form_submit_button("Generate Image", use_container_width=True)
         
         if submitted and prompt_text.strip() and ai_alt_text.strip():
             # Store current inputs for potential retry
@@ -322,10 +341,45 @@ if together_available or openai_available:
 
             # Enhance prompt with selected options
             final_prompt = prompt_text
+            # Optional prefix to improve composition
+            if add_visually_striking_prefix:
+                lower_pt = final_prompt.strip().lower()
+                if not lower_pt.startswith("a visually striking image of"):
+                    # Avoid double spaces when user already typed a leading article
+                    final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
             if add_blockchain_bg:
                 final_prompt = f"{final_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
             if add_hdr_grading:
                 final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
+            # Apply background / color scheme selection (site presets) and overwrite any prior background sentences
+            if bg_option and bg_option != "None":
+                preset_map = {
+                    "CryptoNews (Bitberry)": "Use a Bitberry-inspired purple colour scheme with modern gradients.",
+                    "ICOBench (Green)": "Background should be green to dark green gradient.",
+                    "CryptoDnes (Gold)": "Background should be gold to dark gradient.",
+                    "Bitcoinist (Blue)": "Background should be blue to light blue colour scheme.",
+                }
+                chosen_sentence = preset_map.get(bg_option)
+                if chosen_sentence:
+                    # Remove existing sentences that specify background or colour scheme to avoid conflicts
+                    text = final_prompt.strip()
+                    # Remove sentences starting with 'Background' or containing 'color/colour scheme'
+                    sentence_end = r"(?<=[.!?])\s+"
+                    sentences = re.split(sentence_end, text)
+                    filtered = []
+                    for s in sentences:
+                        s_stripped = s.strip()
+                        if not s_stripped:
+                            continue
+                        if re.search(r"^(?i)background ", s_stripped):
+                            continue
+                        if re.search(r"(?i)colou?r scheme", s_stripped):
+                            continue
+                        filtered.append(s_stripped)
+                    cleaned = ". ".join(filtered).strip()
+                    if cleaned and not cleaned.endswith(('.', '!', '?')):
+                        cleaned += "."
+                    final_prompt = f"{cleaned} {chosen_sentence}".strip()
 
             # Generate image based on selected provider
             if "Together AI" in provider and together_available:
