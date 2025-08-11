@@ -371,9 +371,9 @@ if together_available or openai_available:
                         s_stripped = s.strip()
                         if not s_stripped:
                             continue
-                        if re.search(r"^(?i)background ", s_stripped):
+                        if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
                             continue
-                        if re.search(r"(?i)colou?r scheme", s_stripped):
+                        if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
                             continue
                         filtered.append(s_stripped)
                     cleaned = ". ".join(filtered).strip()
