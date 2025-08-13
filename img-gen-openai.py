@@ -348,16 +348,16 @@ if together_available or openai_available:
                     # Avoid double spaces when user already typed a leading article
                     final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
             if add_blockchain_bg:
-                final_prompt = f"{final_prompt.rstrip('.')}. The background is futuristic glowing blockchain."
+                final_prompt = f"{final_prompt.rstrip('.')}. The background features a futuristic glowing blockchain motif. Apply any color scheme only to the background elements. Keep all main subjects in their natural, realistic, untinted colors with strong contrast so they pop."
             if add_hdr_grading:
                 final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
             # Apply background / color scheme selection (site presets) and overwrite any prior background sentences
             if bg_option and bg_option != "None":
                 preset_map = {
-                    "CryptoNews (Bitberry)": "Use a Bitberry-inspired purple colour scheme with modern gradients.",
-                    "ICOBench (Green)": "Background should be green to dark green gradient.",
-                    "CryptoDnes (Gold)": "Background should be gold to dark gradient.",
-                    "Bitcoinist (Blue)": "Background should be blue to light blue colour scheme.",
+                    "CryptoNews (Bitberry)": "Use a Bitberry-inspired purple colour scheme with modern gradients for the background only; keep all main subjects in natural, realistic, untinted colors that strongly contrast with the background so they pop.",
+                    "ICOBench (Green)": "Background should be a green-to-dark-green gradient applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
+                    "CryptoDnes (Gold)": "Background should be a gold-to-dark gradient applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
+                    "Bitcoinist (Blue)": "Background should use a blue-to-light-blue colour scheme applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
                 }
                 chosen_sentence = preset_map.get(bg_option)
                 if chosen_sentence:
