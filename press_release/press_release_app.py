@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import json
 import csv
 from typing import Optional
 
@@ -11,11 +12,16 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 from dotenv import load_dotenv
 import requests
 
-from press_release.press_release_llm import generate_press_release_outputs
+from press_release.press_release_llm import (
+    generate_press_release_outputs,
+    llm_generate_thai_cta,
+    llm_should_replace_last_section,
+)
 from press_release.html_utils import (
     ensure_allowed_tags,
     split_sections_by_headings,
@@ -23,7 +29,10 @@ from press_release.html_utils import (
     insert_su_note_into_section,
     join_sections_to_html,
     build_cta_paragraphs,
+    prettify_html_for_display,
+    make_copyable_html,
 )
+from press_release.cta_templates import render_templates
 
 # Reuse uploader utilities if available
 try:
@@ -105,55 +114,46 @@ st.title("Thai Crypto Press Release Generator (Google Discover–optimized)")
 
 with st.sidebar:
     st.header("Settings")
-    main_keyword = st.text_input("Main Keyword (Thai or English)", "Best Wallet")
-    project_name = st.text_input("Project Name", "Best Wallet")
+    main_keyword = st.text_input("Main Keyword (Thai or English)", value="เหรียญคริปโตที่น่าลงทุนวันนี้")
+    project_name = st.text_input("Project Name", value="Bitcoin Hyper")
     site_key = st.selectbox("Target Site Key", [
         "ICOBENCH", "CRYPTONEWS", "BITCOINIST", "INSIDEBITCOINS", "CRYPTODNES", "OTHERS"
-    ], index=2)
-    date_string = st.text_input("Date string to enforce when mentioned", "ณ วันที่ 15 สิงหาคม 2025")
+    ], index=0)
     english_headline_seed = st.text_input("Optional English headline seed (used as a base)", "")
-    rewrite_to_thai = st.checkbox("Rewrite content to Thai news style (recommended)", value=True)
 
-    st.markdown("---")
-    st.subheader("CTA Google Sheet")
-    gsheet_url = st.text_input(
-        "Google Sheet URL (Anyone with link can view)",
-        key="gsheet_url",
-        placeholder="https://docs.google.com/spreadsheets/d/<id>/edit?gid=0",
-    )
-    # Auto-fetch when URL changes
-    def _extract_sheet_id_gid(url: str):
-        import re
-        m_id = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", url)
-        m_gid = re.search(r"[?&]gid=(\d+)", url)
-        return (m_id.group(1) if m_id else None, m_gid.group(1) if m_gid else "0")
+    # CTA SHEET: Accept edit URL and convert to CSV export automatically
+    CTA_EDIT_URL = "https://docs.google.com/spreadsheets/d/18LgIQv6m2XFIkl2Plxt2r3bHHvBP8c1PhUSY7-s2lOI/edit?gid=1826014060#gid=1826014060"
+    def _to_csv_export(url: str) -> str:
+        try:
+            # turn /edit?gid=... to /export?format=csv&gid=...
+            if "/edit" in url:
+                base, rest = url.split("/edit", 1)
+                # try to find gid
+                gid = ""
+                if "gid=" in url:
+                    gid = url.split("gid=")[-1].split("&")[0].split("#")[0]
+                if gid:
+                    return f"{base}/export?format=csv&gid={gid}"
+                return f"{base}/export?format=csv"
+            return url
+        except Exception:
+            return url
+    CTA_SHEET_CSV_URL = _to_csv_export(CTA_EDIT_URL)
+    FIXED_CTA_SHEET_ID = "18LgIQv6m2XFIkl2Plxt2r3bHHvBP8c1PhUSY7-s2lOI"
+    FIXED_CTA_GID = "1826014060"
+    export_url = f"https://docs.google.com/spreadsheets/d/{FIXED_CTA_SHEET_ID}/export?format=csv&gid={FIXED_CTA_GID}"
+    if st.session_state.get("_cta_src") != export_url:
+        try:
+            r = requests.get(export_url, timeout=20)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text))
+            st.session_state["cta_df"] = df
+            st.session_state["_cta_src"] = export_url
+            st.success("Loaded CTA data from fixed Google Sheet.")
+        except Exception as e:
+            st.error(f"Failed to load fixed Google Sheet CSV: {e}")
 
-    last_url = st.session_state.get("_last_gsheet_url", "")
-    if gsheet_url and gsheet_url != last_url:
-        sid, gid = _extract_sheet_id_gid(gsheet_url.strip()) if gsheet_url.strip() else (None, None)
-        if not sid:
-            st.error("Invalid Google Sheet URL. Use .../spreadsheets/d/<id>/edit?gid=0")
-        else:
-            export_url = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=csv&gid={gid or '0'}"
-            try:
-                r = requests.get(export_url, timeout=20)
-                r.raise_for_status()
-                df = pd.read_csv(io.StringIO(r.text))
-                st.session_state["cta_df"] = df
-                st.session_state["_last_gsheet_url"] = gsheet_url
-                st.success("Loaded CTA data from Google Sheet.")
-            except Exception as e:
-                st.error(f"Failed to load Google Sheet CSV: {e}")
-
-    st.markdown("---")
-    st.subheader("Manual CTA Fallback")
-    st.caption("If the Google Sheet doesn't match, we will insert this block instead.")
-    st.text_area(
-        "Manual CTA HTML or shortcode (e.g., [su_button ...])",
-        key="manual_cta_html",
-        height=120,
-        placeholder="<p>สนใจรายละเอียดเพิ่มเติม คลิกปุ่มด้านล่าง</p>\n[su_button url=\"https://example.com\" background=\"#ffd600\" color=\"#000\"]สมัครตอนนี้[/su_button]",
-    )
+    # Sidebar CTA controls removed for a cleaner UI; CTA is handled within the main content pipeline
 
 st.subheader("1) Source content")
 gd_col1, gd_col2 = st.columns([3,1])
@@ -190,9 +190,6 @@ if docx_file is not None:
 
 source_content = st.text_area("Google Doc content (auto-filled if fetched)", height=300, key="source_content")
 
-st.subheader("2) Optional su_note content (placed mid promotional section)")
-su_note_input = st.text_area("su_note content (omit brackets) — keep concise and time-sensitive", placeholder="เช็คเวลาโบนัสรอบปัจจุบันก่อนพลาดโอกาส!")
-
 col_a, col_b = st.columns(2)
 with col_a:
     generate_btn = st.button("Generate Press Release")
@@ -210,25 +207,14 @@ if generate_btn:
         main_keyword=main_keyword,
         project_name=project_name,
         site_key=site_key,
-        date_string=date_string,
         english_headline_seed=english_headline_seed.strip() or None,
-        rewrite_to_thai=rewrite_to_thai,
+        rewrite_to_thai=True,
     )
 
     html_clean = ensure_allowed_tags(outputs["html"])  # safety pass
 
-    # Split sections and place su_note inside promotional section
+    # Split sections
     sections = split_sections_by_headings(html_clean)
-
-    # Build su_note shortcode if provided
-    su_note_html = ""
-    if su_note_input.strip():
-        body = su_note_input.strip()
-        su_note_html = f"[su_note note_color=\"#ffffff\" text_color=\"#000000\" radius=\"0\"]{body}[/su_note]"
-
-    promo_idx = find_promotional_section_index(sections, project_name=project_name, main_keyword=main_keyword)
-    if su_note_html:
-        insert_su_note_into_section(sections[promo_idx], su_note_html)
 
     # CTA from Google Sheet or manual fallback
     cta_df = st.session_state.get("cta_df")
@@ -237,45 +223,288 @@ if generate_btn:
     # Decide CTA block
     cta_block = None
     if cta_row:
-        cta_block = build_cta_paragraphs(project_name=project_name, site_key=site_key, cta_row=cta_row)
+        # Prefer LLM-generated Thai CTA using links from the sheet; fallback to rules-based builder
+        cta_block = llm_generate_thai_cta(
+            project_name=project_name,
+            site_key=site_key,
+            main_keyword=main_keyword,
+            cta_row=cta_row,
+        ) or build_cta_paragraphs(project_name=project_name, site_key=site_key, cta_row=cta_row)
     else:
         manual_cta_html = st.session_state.get("manual_cta_html", "").strip()
         if manual_cta_html:
             cta_block = manual_cta_html
 
-    # Append CTA paragraphs/button near end of promotional section if available
+    # Decide whether to REPLACE the last section (if it's already a how-to-buy CTA) or APPEND a new final CTA
     if cta_block:
         from bs4 import BeautifulSoup
-        promo_soup = BeautifulSoup(str(sections[promo_idx]), "html.parser")
-        promo_soup.append(BeautifulSoup(cta_block, "html.parser"))
-        sections[promo_idx].clear()
-        for child in promo_soup.div.children if promo_soup.div else promo_soup.children:
-            sections[promo_idx].append(child)
+
+        # Build CTA wrapper once
+        cta_soup = BeautifulSoup("<div data-section='1'></div>", "html.parser")
+        wrapper = cta_soup.div
+        h2 = cta_soup.new_tag("h2")
+        h2.string = f"วิธีซื้อโทเคน {project_name}"
+        wrapper.append(h2)
+        wrapper.append(BeautifulSoup(cta_block, "html.parser"))
+
+        decision = None
+        try:
+            # Evaluate using ORIGINAL content and include trailing paragraphs window (helps catch half-CTA endings)
+            from bs4 import BeautifulSoup as _BS
+            orig_html = ensure_allowed_tags(st.session_state.get("source_content", ""))
+            orig_sections = split_sections_by_headings(orig_html)
+            last_text = ""
+            if orig_sections:
+                # Last section text (original only)
+                last_text = orig_sections[-1].get_text(" ", strip=True)
+            # Also collect last few paragraphs from the whole document
+            soup_all = _BS(orig_html, "html.parser")
+            paras = soup_all.find_all("p")[-5:] if soup_all else []
+            tail_paras = "\n".join(p.get_text(" ", strip=True) for p in paras if p)
+            # Extract href hostnames from trailing paragraphs to preserve social/affiliate cues
+            try:
+                from urllib.parse import urlparse as _u
+                links = []
+                for p in paras:
+                    for a in p.find_all("a"):
+                        href = a.get("href") or ""
+                        if href:
+                            host = _u(href).netloc or href
+                            if host and host not in links:
+                                links.append(host)
+                links_summary = ("\nLINKS: " + ", ".join(links)) if links else ""
+            except Exception:
+                links_summary = ""
+            trailing = (last_text + "\n" + tail_paras + links_summary).strip()
+            decision = llm_should_replace_last_section(
+                last_section_text=trailing,
+                project_name=project_name,
+                main_keyword=main_keyword,
+                site_key=site_key,
+            )
+        except Exception:
+            decision = None
+
+        # Replace only when LLM explicitly says so; otherwise append as its own section
+        if (decision and decision.get("decision") == "replace_last"):
+            sections[-1].clear()
+            # Important: iterate over a static copy, not the live generator
+            for child in list(wrapper.contents):
+                sections[-1].append(child)
+        else:
+            # Default: append as a dedicated final section
+            sections.append(wrapper)
 
     final_html = ensure_allowed_tags(join_sections_to_html(sections))
+    # If we replaced the last section with standardized CTA, scrub any lingering weak-CTA tail paragraphs
+    try:
+        if (decision and decision.get("decision") == "replace_last"):
+            from bs4 import BeautifulSoup as _BS_clean
+            _soup = _BS_clean(final_html, "html.parser")
+            cues_text = [
+                "ซื้อ", "วิธีซื้อ", "เยี่ยมชมเว็บไซต์", "เว็บไซต์ทางการ", "เว็บไซต์พรีเซล", "ลงทะเบียน", "พรีเซล", "สมัคร",
+                "ติดตาม", "คอมมูนิตี้", "X (Twitter)", "Telegram", "Instagram",
+                "Buy", "How to buy", "Visit official", "Presale website", "Register"
+            ]
+            href_cues = ["/visit/", "transfer=", "?ref=", "utm_", "/en/staking", "/staking", "x.com", "instagram.com"]
+            # Inspect only the last 8 paragraphs for safety
+            tail_ps = _soup.find_all("p")[-8:]
+            removed = False
+            for p in list(tail_ps):
+                txt = p.get_text(" ", strip=True) or ""
+                hrefs = [a.get("href") or "" for a in p.find_all("a")]
+                if any(c in txt for c in cues_text) or any(any(h in hrf for h in href_cues) for hrf in hrefs):
+                    p.decompose()
+                    removed = True
+            if removed:
+                final_html = str(_soup)
+    except Exception:
+        pass
+    # Attempt to repair truncated/imbalanced HTML and warn user if a fix was applied
+    try:
+        from bs4 import BeautifulSoup as _BS_fix
+        repaired = str(_BS_fix(final_html, "html.parser"))
+        if repaired and repaired != final_html:
+            st.warning("HTML appeared truncated or imbalanced. It has been auto-repaired.")
+            final_html = repaired
+    except Exception:
+        pass
+
+    # Normalize inline links across the whole document:
+    # - Replace <br> inside <p> with spaces
+    # - Merge paras that contain only links (optionally wrapped in formatting tags or separator-only text) into the previous paragraph
+    try:
+        from bs4 import BeautifulSoup as _BS_norm
+        soup_norm = _BS_norm(final_html, "html.parser")
+        # Replace <br> inside <p> with spaces to keep inline
+        for p in soup_norm.find_all("p"):
+            for br in p.find_all("br"):
+                br.replace_with(" ")
+        # Merge paragraphs that contain only anchors (possibly wrapped) or anchors with separator-only text
+        def _is_anchor_wrapped(node):
+            # Accept formatting wrappers that only contain anchors/whitespace
+            if getattr(node, "name", None) in {"em", "strong", "span", "b", "i", "u", "small", "code"}:
+                # if any non-anchor element exists inside, reject
+                for ch in node.contents:
+                    if isinstance(ch, str):
+                        if ch.strip() and not re.match(r"^[\|\-•·,、/\\\\\s]+$", ch):
+                            return False
+                    else:
+                        if getattr(ch, "name", None) != "a" and not _is_anchor_wrapped(ch):
+                            return False
+                return True
+            return False
+
+        import re as _norm_re
+        re = _norm_re  # reuse name for inline checks above
+
+        def _is_anchor_only_para(p_tag):
+            has_anchor = False
+            for node in p_tag.contents:
+                if isinstance(node, str):
+                    # allow only separators like | / • · , - and whitespace
+                    if node.strip() and not re.match(r"^[\|\-•·,、/\\\\\s]+$", node):
+                        return False
+                else:
+                    nm = getattr(node, "name", None)
+                    if nm == "a":
+                        has_anchor = True
+                        continue
+                    if _is_anchor_wrapped(node):
+                        has_anchor = True
+                        continue
+                    # any other element -> not anchor-only
+                    return False
+            return has_anchor
+
+        paragraphs = soup_norm.find_all("p")
+        i = 1
+        while i < len(paragraphs):
+            cur = paragraphs[i]
+            prev = paragraphs[i-1]
+            if _is_anchor_only_para(cur):
+                # Insert a space to ensure inline flow and move all anchor nodes
+                prev.append(" ")
+                for node in list(cur.contents):
+                    prev.append(node)
+                cur.decompose()
+                paragraphs.pop(i)
+                continue
+            i += 1
+        # Drop truly empty paragraphs (no text, no <img>, no <a>)
+        for p in list(soup_norm.find_all("p")):
+            if not (p.get_text(strip=True) or p.find("img") or p.find("a")):
+                p.decompose()
+        final_html = str(soup_norm)
+    except Exception:
+        pass
+
+    # Remove bolding for main keyword: strip **...** markers and unwrap <strong> around the keyword
+    try:
+        import re as _re
+        mk_txt = (main_keyword or "").strip()
+        if mk_txt:
+            # Remove markdown bold around the keyword specifically
+            final_html = final_html.replace(f"**{mk_txt}**", mk_txt)
+        # Remove any remaining **bold** markers globally (safe fallback)
+        final_html = _re.sub(r"\*\*([^*]+)\*\*", r"\1", final_html)
+        # Unwrap <strong> tags that contain the main keyword
+        from bs4 import BeautifulSoup as _BS_unwrap
+        soup_unwrap = _BS_unwrap(final_html, "html.parser")
+        if mk_txt:
+            for strong in soup_unwrap.find_all("strong"):
+                if mk_txt in (strong.get_text() or ""):
+                    strong.unwrap()
+        final_html = str(soup_unwrap)
+    except Exception:
+        pass
 
     st.session_state.pr_outputs = {
         "titles": outputs["titles"],
         "meta_descriptions": outputs["meta_descriptions"],
         "slug": outputs["slug"],
         "html": final_html,
+        "rewrite_attempted": outputs.get("rewrite_attempted", False),
+        "rewrite_applied": outputs.get("rewrite_applied", False),
     }
+
+    # Keyword coverage diagnostics (non-blocking)
+    try:
+        from bs4 import BeautifulSoup as _BS
+        body_text = _BS(final_html, "html.parser").get_text(" ", strip=True)
+        st.session_state["kw_body_count"] = body_text.count(main_keyword)
+    except Exception:
+        st.session_state["kw_body_count"] = None
 
     st.success("Generated! Review SEO options and HTML below.")
 
 if "pr_outputs" in st.session_state:
     st.markdown("---")
     st.subheader("3) Choose SEO title and meta description")
+    # Surface Thai rewrite status
+    if st.session_state.pr_outputs.get("rewrite_attempted") and not st.session_state.pr_outputs.get("rewrite_applied"):
+        st.warning("Thai rewrite was requested but not applied. Check OPENROUTER_API_KEY and model access, then try again.")
     t1, t2 = st.columns(2)
     with t1:
-        chosen_title = st.selectbox("Pick one title", st.session_state.pr_outputs["titles"], index=0)
+        # Minimal: choose first suggested title; allow edit
+        title_opts = st.session_state.pr_outputs["titles"]
+        chosen_title = title_opts[0] if title_opts else ""
+        chosen_title = st.text_input("Final title", value=chosen_title, key="final_title_input")
+
     with t2:
-        chosen_meta = st.selectbox("Pick one meta description", st.session_state.pr_outputs["meta_descriptions"], index=0)
+        # Minimal: choose first suggested meta; allow edit
+        meta_opts = st.session_state.pr_outputs["meta_descriptions"]
+        chosen_meta = meta_opts[0] if meta_opts else ""
+        chosen_meta = st.text_area("Final meta", value=chosen_meta, height=80, key="final_meta_input")
 
-    st.text_input("Slug (English, includes main keyword)", value=st.session_state.pr_outputs["slug"], key="slug_input")
+    # Enforce slug 7–10 words
+    slug_val = st.session_state.pr_outputs["slug"]
+    def _limit_words_slug(s: str, min_w: int = 7, max_w: int = 10) -> str:
+        parts = [p for p in str(s).strip().lower().replace(" ", "-").split('-') if p]
+        if len(parts) <= max_w:
+            return '-'.join(parts)
+        return '-'.join(parts[:max_w])
+    def _word_count(s: str) -> int:
+        return len([p for p in str(s).split('-') if p])
 
-    st.subheader("4) HTML Preview (clean, WordPress Text mode)")
-    st.code(st.session_state.pr_outputs["html"], language="html")
+    slug_val = _limit_words_slug(slug_val)
+
+    col_a, col_b = st.columns([3,1])
+    with col_a:
+        slug_val = st.text_input("Slug (English, descriptive, 7–10 words)", value=slug_val, key="slug_input")
+    with col_b:
+        def _expand_slug_from_title(slug: str, title_txt: str, kw: str) -> str:
+            base = slug
+            # Try to append keyword tokens if missing/short
+            extra = []
+            for token in str(kw).lower().split():
+                if token and token not in base:
+                    extra.append(token)
+            base = (base + '-' + '-'.join(extra)).strip('-') if extra else base
+            return _limit_words_slug(base)
+        if st.button("Expand slug"):
+            st.session_state["slug_input"] = _expand_slug_from_title(slug_val, st.session_state.get("final_title_input", ""), main_keyword)
+
+    # Simplified: hide diagnostics/warnings for a cleaner UI
+
+    st.subheader("4) Preview & HTML code")
+    from streamlit import components
+    html_render = st.session_state.pr_outputs["html"]
+    # For copying/pasting into WordPress, use compact copy-safe HTML (no prettify line breaks)
+    html_pretty = make_copyable_html(html_render)
+    tab1, tab2 = st.tabs(["Rendered preview", "HTML (copyable)"])
+    with tab1:
+        components.v1.html(html_render, height=2000, scrolling=True)
+    with tab2:
+        st.code(html_pretty, language="html")
+        st.download_button(
+            label="Download HTML",
+            data=html_pretty.encode("utf-8"),
+            file_name=f"{st.session_state.get('slug_input', 'press-release')}.html",
+            mime="text/html",
+        )
+
+    # Removed section 5 (CTA Generator UI) to keep the app focused and professional.
 
     if upload_btn:
         if submit_article_to_wp is None:
