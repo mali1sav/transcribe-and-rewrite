@@ -226,6 +226,46 @@ def ensure_allowed_tags(html: str) -> str:
     return sanitize_html_keep_structure(html)
 
 
+def prettify_html_for_display(html: str) -> str:
+    """Return a multi-line, human-readable HTML for UI display and copying.
+    Does NOT change the underlying structure; only formatting with indentation/newlines.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    # Use minimal formatter to avoid escaping quotes unnecessarily
+    try:
+        return soup.prettify(formatter="minimal")
+    except Exception:
+        return str(soup)
+
+
+def make_copyable_html(html: str) -> str:
+    """Return a compact, copy-safe HTML string with no prettify-induced line breaks.
+    - Collapses excessive whitespace inside <p>, ensuring inline <a> stays in sentences.
+    - Removes empty paragraphs.
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    # Remove empty <p> tags and normalize whitespace inside paragraphs
+    for p in list(soup.find_all("p")):
+        # Drop paragraphs that have no text and no non-whitespace children
+        has_text = (p.get_text(strip=True) or "") != ""
+        has_elements = any(isinstance(ch, Tag) for ch in p.contents)
+        if not has_text and not has_elements:
+            p.decompose()
+            continue
+        # Collapse whitespace in text nodes to prevent line breaks between inline elements
+        for node in list(p.descendants):
+            if isinstance(node, NavigableString):
+                compact = re.sub(r"\s+", " ", str(node))
+                if compact != str(node):
+                    node.replace_with(compact)
+    # Ensure there are no stray newlines between inline anchors and text
+    out = str(soup)
+    # Remove newlines that are immediately inside paragraph boundaries
+    out = re.sub(r"<p>\s+", "<p>", out)
+    out = re.sub(r"\s+</p>", "</p>", out)
+    return out
+
+
 def build_cta_paragraphs(
     project_name: str,
     site_key: str,
