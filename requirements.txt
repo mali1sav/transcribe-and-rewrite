@@ -15,3 +15,5 @@ pydantic
 firecrawl
 markdown
 slugify
+beautifulsoup4
+
