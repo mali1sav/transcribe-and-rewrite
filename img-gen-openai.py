@@ -80,9 +80,9 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
 # ===================================================
 # --- Image Processing (resize/optimize for WordPress)
 # ===================================================
-def process_image_for_wordpress(image_bytes, final_quality=80):
+def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_16_9=False):
     """
-    Intelligently resizes images for WordPress based on their aspect ratio and orientation.
+    Optimizes for WP and (optionally) hard-enforces 16:9 landscape by center-cropping.
     - Landscape images: Max width 1200px
     - Portrait images: Max height 675px (16:9 ratio)
     - Very wide banners: Max width 1400px, min height 300px
@@ -93,62 +93,75 @@ def process_image_for_wordpress(image_bytes, final_quality=80):
         if img.mode != 'RGB':
             img = img.convert('RGB')
 
-        current_width, current_height = img.size
-        if current_width == 0 or current_height == 0:
+        w, h = img.size
+        if w == 0 or h == 0:
             raise ValueError("Image dimensions are invalid.")
+        aspect_ratio = w / float(h)
 
-        aspect_ratio = float(current_width) / float(current_height)
+        # --- Force 16:9 landscape if requested ---
+        if force_landscape_16_9:
+            target = 16.0 / 9.0
+            eps = 0.01
+            if abs(aspect_ratio - target) > eps:
+                if aspect_ratio > target:
+                    # too wide -> crop width
+                    new_w = int(h * target)
+                    left = max((w - new_w) // 2, 0)
+                    img = img.crop((left, 0, left + new_w, h))
+                else:
+                    # too tall -> crop height
+                    new_h = int(w / target)
+                    top = max((h - new_h) // 2, 0)
+                    img = img.crop((0, top, w, top + new_h))
+                w, h = img.size
+                aspect_ratio = w / float(h)
 
+        # --- Resize rules (unchanged) ---
         if aspect_ratio >= 2.5:
             max_width = 1400
             min_height = 300
-            if current_width > max_width:
+            if w > max_width:
                 new_width = max_width
                 new_height = max(int(max_width / aspect_ratio), min_height)
             else:
-                new_width = current_width
-                new_height = current_height
+                new_width, new_height = w, h
         elif aspect_ratio <= 0.4:
             max_height = 800
             min_width = 400
-            if current_height > max_height:
+            if h > max_height:
                 new_height = max_height
                 new_width = max(int(max_height * aspect_ratio), min_width)
             else:
-                new_width = current_width
-                new_height = current_height
+                new_width, new_height = w, h
         elif aspect_ratio >= 1.0:
             max_width = 1200
-            if current_width > max_width:
+            if w > max_width:
                 new_width = max_width
                 new_height = int(max_width / aspect_ratio)
             else:
-                new_width = current_width
-                new_height = current_height
+                new_width, new_height = w, h
         else:
             max_height = 675
-            if current_height > max_height:
+            if h > max_height:
                 new_height = max_height
                 new_width = int(max_height * aspect_ratio)
             else:
-                new_width = current_width
-                new_height = current_height
+                new_width, new_height = w, h
 
-        if new_width != current_width or new_height != current_height:
+        if new_width != w or new_height != h:
             img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            st.info(f"Resized from {current_width}×{current_height} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
+            st.info(f"Resized from {w}×{h} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
         else:
             img_resized = img
-            st.info(f"Image kept at original size: {current_width}×{current_height} (aspect ratio: {aspect_ratio:.2f})")
+            st.info(f"Image kept at {w}×{h} (aspect ratio: {aspect_ratio:.2f})")
 
-        jpeg_bytes_io = BytesIO()
-        img_resized.save(jpeg_bytes_io, format="JPEG", quality=final_quality, optimize=True)
-        jpeg_bytes_io.seek(0)
-        return jpeg_bytes_io
+        out = BytesIO()
+        img_resized.save(out, format="JPEG", quality=final_quality, optimize=True)
+        out.seek(0)
+        return out
 
     except Exception as e:
         st.error(f"Error processing image: {e}")
-        # Diagnostics
         try:
             st.caption(f"Debug Info: Input data type: {type(image_bytes)}, Length: {len(image_bytes)}")
             if isinstance(image_bytes, bytes):
@@ -156,6 +169,7 @@ def process_image_for_wordpress(image_bytes, final_quality=80):
         except Exception as debug_e:
             st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
+
 
 # ========================================
 # --- Providers: Together, OpenAI, OpenRouter
@@ -351,7 +365,7 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
                 "content": [
                     {
                         "type": "text",
-                        "text": "You are an image generation model. Return exactly one image. Do not include extra text."
+                        "text": "You are an image generation model. Return exactly one image and no extra text."
                     }
                 ],
             },
@@ -360,7 +374,12 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
                 "content": [
                     {
                         "type": "text",
-                        "text": f"{prompt.strip()} Create a single high-quality image. Target resolution near {width}x{height}."
+                        "text": (
+                            f"{prompt.strip()}\n\n"
+                            f"Create exactly one high-quality image in landscape 16:9 aspect ratio "
+                            f"(approximately {width}x{height}). Do not include any text output; "
+                            f"respond with the image only."
+                        )
                     }
                 ],
             },
@@ -369,7 +388,6 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         payload = {
             "model": "google/gemini-2.5-flash-image-preview",
             "messages": messages,
-            # These hints help some routers/providers return the image payload
             "temperature": 0.7,
         }
 
@@ -382,7 +400,6 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         img_bytes = _extract_openrouter_image_bytes(resp_json)
         if not img_bytes:
             st.error("OpenRouter response did not include a decodable image.")
-            # Show a little more context to aid debugging
             try:
                 truncated = json.dumps(resp_json.get("choices", [{}])[0]).strip()
                 st.caption(f"Debug (choices[0] truncated): {truncated[:1500]}...")
@@ -395,6 +412,7 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
     except Exception as e:
         st.error(f"Error calling OpenRouter API: {e}")
         return None
+
 
 
 # ==========================================
@@ -538,7 +556,16 @@ if together_available or openai_available or openrouter_available:
                 image_bytes_from_api = None
 
             if image_bytes_from_api:
-                final_image_bytes_io = process_image_for_wordpress(image_bytes_from_api)
+                # Enforce 16:9 only for OpenRouter outputs
+                force_169 = (
+                    st.session_state.last_used_provider == "OpenRouter"
+                    or provider == "OpenRouter (Gemini 2.5 Image)"
+                )
+                final_image_bytes_io = process_image_for_wordpress(
+                    image_bytes_from_api,
+                    force_landscape_16_9=force_169
+                )
+            
                 if final_image_bytes_io:
                     st.session_state.active_image_bytes_io = final_image_bytes_io
                     st.session_state.active_image_alt_text = ai_alt_text
@@ -548,8 +575,6 @@ if together_available or openai_available or openrouter_available:
             else:
                 if provider:
                     st.error(f"Failed to generate image with {provider}.")
-        elif submitted and (not prompt_text.strip() or not ai_alt_text.strip()):
-            st.warning("Please provide both an image prompt AND alt text before generating.")
 
 # -------------------------------
 # --- Section: Upload Your Image
