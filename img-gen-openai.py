@@ -475,11 +475,11 @@ if together_available or openai_available or openrouter_available:
             provider_options = []
             default_index = 0
             if together_available:
-                provider_options.append("Together AI (Free - Flux Model)")
+                provider_options.append("Flux model (Free)")
             if openai_available:
-                provider_options.append("OpenAI (Premium - GPT Image)")
+                provider_options.append("OpenAI ($0.30 per image)")
             if openrouter_available:
-                provider_options.append("OpenRouter (Gemini 2.5 Image)")
+                provider_options.append("Nano Banana ( $0.03 per image)")
             # Set default to Together if present, else first available
             if provider_options:
                 provider = st.radio("Choose AI Provider:", provider_options, index=0, key="provider_selection")
