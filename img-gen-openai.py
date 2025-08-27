@@ -255,39 +255,70 @@ def generate_image_openai(prompt, size="1536x1024"):
 # ---------- OpenRouter (Gemini 2.5 Flash Image Preview) ----------
 def _extract_openrouter_image_bytes(resp_json):
     """
-    Extract image bytes from OpenRouter chat/completions response.
-    Handles multiple possible shapes:
-      - content is a list with parts like {"type":"output_image", "image_base64": "..."} or {"type":"output_image","image_url":"https://..."}
-      - content is a string containing a data URL
+    Extract image bytes from OpenRouter chat/completions responses for image models.
+    Supports all observed shapes:
+      1) choices[0].message.images[].image_url.url  (can be https:// or data:image/...;base64,...)
+      2) choices[0].message.content: list of parts with image_url / image_base64 / b64_json
+      3) choices[0].message.content: str containing a data URL
     """
     try:
         choices = resp_json.get("choices", [])
         if not choices:
             return None
-        content = choices[0].get("message", {}).get("content")
 
-        # Case 1: list of parts (preferred structure)
+        msg = choices[0].get("message", {}) or {}
+
+        # --- Case 1: explicit "images" array (Google provider often uses this) ---
+        imgs = msg.get("images")
+        if isinstance(imgs, list) and imgs:
+            for it in imgs:
+                if not isinstance(it, dict):
+                    continue
+                iu = it.get("image_url") or {}
+                url = iu.get("url")
+                if not url:
+                    continue
+                # data URL (base64 inline)
+                if url.startswith("data:image/"):
+                    # e.g. data:image/png;base64,AAAA...
+                    m = re.search(r"base64,([A-Za-z0-9+/=]+)$", url)
+                    if m:
+                        return base64.b64decode(m.group(1))
+                # remote URL
+                try:
+                    r = requests.get(url, timeout=30)
+                    if r.status_code == 200:
+                        return r.content
+                except Exception:
+                    pass  # move on to other shapes
+
+        # --- Case 2: content as list of parts ---
+        content = msg.get("content")
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict):
-                    part_type = part.get("type", "").lower()
-                    # base64 path
-                    if ("image_base64" in part) or ("b64" in part):
-                        b64 = part.get("image_base64") or part.get("b64")
-                        if b64:
-                            return base64.b64decode(b64)
-                    # URL path
-                    if part_type in ("output_image", "image", "image_url") and part.get("image_url"):
-                        url = part.get("image_url")
+                if not isinstance(part, dict):
+                    continue
+                # base64 variants
+                for key in ("image_base64", "b64", "b64_json"):
+                    if key in part and part[key]:
+                        return base64.b64decode(part[key])
+                # url variant
+                if "image_url" in part and isinstance(part["image_url"], dict):
+                    url = part["image_url"].get("url")
+                    if url:
+                        if url.startswith("data:image/"):
+                            m = re.search(r"base64,([A-Za-z0-9+/=]+)$", url)
+                            if m:
+                                return base64.b64decode(m.group(1))
                         try:
                             r = requests.get(url, timeout=30)
                             if r.status_code == 200:
                                 return r.content
                         except Exception:
-                            continue
+                            pass
 
-        # Case 2: string that might contain data URL
-        if isinstance(content, str):
+        # --- Case 3: content as a single string containing a data URL ---
+        if isinstance(content, str) and content:
             m = re.search(r'data:image/(?:png|jpeg|jpg);base64,([A-Za-z0-9+/=]+)', content)
             if m:
                 return base64.b64decode(m.group(1))
@@ -295,6 +326,7 @@ def _extract_openrouter_image_bytes(resp_json):
         return None
     except Exception:
         return None
+
 
 def generate_image_openrouter(prompt, width=1536, height=1024):
     """
@@ -313,30 +345,32 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         if OPENROUTER_SITE_NAME:
             headers["X-Title"] = OPENROUTER_SITE_NAME
 
-        # Nudge the model to return an image, not an essay.
         messages = [
             {
                 "role": "system",
                 "content": [
-                    {"type": "text",
-                     "text": "You are an image generation model. Respond with exactly one image output for the user's request. Do not include additional text."}
-                ]
+                    {
+                        "type": "text",
+                        "text": "You are an image generation model. Return exactly one image. Do not include extra text."
+                    }
+                ],
             },
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        # size hints go in prompt; model may ignore but harmless
-                        "text": f"{prompt.strip()} Create a single high-quality image. Target resolution close to {width}x{height}."
+                        "text": f"{prompt.strip()} Create a single high-quality image. Target resolution near {width}x{height}."
                     }
-                ]
-            }
+                ],
+            },
         ]
 
         payload = {
             "model": "google/gemini-2.5-flash-image-preview",
             "messages": messages,
+            # These hints help some routers/providers return the image payload
+            "temperature": 0.7,
         }
 
         resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
@@ -347,15 +381,21 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         resp_json = resp.json()
         img_bytes = _extract_openrouter_image_bytes(resp_json)
         if not img_bytes:
-            # Surface a bit of debug if structure unexpected
-            st.error("OpenRouter response did not include an image. Check model availability and response format.")
-            st.caption(f"Debug (truncated): {json.dumps(resp_json)[:1000]}...")
+            st.error("OpenRouter response did not include a decodable image.")
+            # Show a little more context to aid debugging
+            try:
+                truncated = json.dumps(resp_json.get("choices", [{}])[0]).strip()
+                st.caption(f"Debug (choices[0] truncated): {truncated[:1500]}...")
+            except Exception:
+                pass
             return None
+
         return img_bytes
 
     except Exception as e:
         st.error(f"Error calling OpenRouter API: {e}")
         return None
+
 
 # ==========================================
 # --- Session state for active/generated image
