@@ -538,15 +538,15 @@ if together_available or openai_available or openrouter_available:
 
             # --- Branch by provider
             image_bytes_from_api = None
-            if provider == "Together AI (Free - Flux Model)" and together_available:
+            if provider == "Flux model (Free)" and together_available:
                 st.session_state.last_used_provider = "Together AI"
                 with st.spinner("Generating image with Together AI (Free)..."):
                     image_bytes_from_api = generate_image_together_ai(final_prompt)
-            elif provider == "OpenAI (Premium - GPT Image)" and openai_available:
+            elif provider == "OpenAI ($0.30 per image)" and openai_available:
                 st.session_state.last_used_provider = "OpenAI"
                 with st.spinner("Generating image with OpenAI (Premium)..."):
                     image_bytes_from_api = generate_image_openai(final_prompt, size="1536x1024")
-            elif provider == "OpenRouter (Gemini 2.5 Image)" and openrouter_available:
+            elif provider == "Nano Banana ( $0.03 per image)" and openrouter_available:
                 st.session_state.last_used_provider = "OpenRouter"
                 with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
                     # Width/height are advisory; model may choose its own.
