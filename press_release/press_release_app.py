@@ -44,6 +44,13 @@ except Exception:
     except Exception:
         submit_article_to_wp = None  # type: ignore
 
+# Prefer centralized CTA links provider from search2 if available
+try:
+    from search2.project_cta_links import get_project_cta_links, reload_cta_cache  # type: ignore
+except Exception:
+    get_project_cta_links = None  # type: ignore
+    reload_cta_cache = None  # type: ignore
+
 load_dotenv()
 
 st.set_page_config(page_title="Thai Crypto Press Release Generator", layout="wide")
@@ -153,6 +160,32 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Failed to load fixed Google Sheet CSV: {e}")
 
+    # Optional: allow reloading centralized CTA CSV cache when updated
+    if reload_cta_cache is not None and st.button("Reload CTA CSV cache"):
+        try:
+            reload_cta_cache()
+            st.success("CTA CSV cache cleared. It will be reloaded on next use.")
+        except Exception as e:
+            st.warning(f"Could not reload CTA CSV cache: {e}")
+
+    # Centralized CSV status (for visibility when integrating project_cta_links)
+    try:
+        import importlib
+        cta_mod = importlib.import_module("search2.project_cta_links")
+        csv_name = getattr(cta_mod, "CSV_FILENAME", None)
+        mod_file = getattr(cta_mod, "__file__", None)
+        if csv_name and mod_file:
+            csv_path = os.path.join(os.path.dirname(mod_file), csv_name)
+            if os.path.exists(csv_path):
+                mtime = os.path.getmtime(csv_path)
+                from datetime import datetime
+                st.caption(f"Centralized CTA CSV: {csv_path} (updated {datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M')})")
+            else:
+                st.caption(f"Centralized CTA CSV not found at: {csv_path}")
+    except Exception:
+        # Silent: this is only for operator visibility
+        pass
+
     # Sidebar CTA controls removed for a cleaner UI; CTA is handled within the main content pipeline
 
 st.subheader("1) Source content")
@@ -222,18 +255,55 @@ if generate_btn:
 
     # Decide CTA block
     cta_block = None
-    if cta_row:
-        # Prefer LLM-generated Thai CTA using links from the sheet; fallback to rules-based builder
-        cta_block = llm_generate_thai_cta(
-            project_name=project_name,
-            site_key=site_key,
-            main_keyword=main_keyword,
-            cta_row=cta_row,
-        ) or build_cta_paragraphs(project_name=project_name, site_key=site_key, cta_row=cta_row)
-    else:
+    # 1) Prefer project_cta_links CSV-driven paragraphs if available
+    if get_project_cta_links is not None:
+        try:
+            # Try multiple case variants for project_name and site_key to improve match robustness
+            csv_cta = None
+            proj_variants = list(dict.fromkeys([
+                project_name,
+                str(project_name).strip(),
+                str(project_name).title(),
+                str(project_name).upper(),
+                str(project_name).lower(),
+            ]))
+            site_variants = list(dict.fromkeys([
+                site_key,
+                str(site_key).title(),
+                str(site_key).upper(),
+                str(site_key).lower(),
+            ]))
+            for pj in proj_variants:
+                for sk in site_variants:
+                    csv_cta = get_project_cta_links(pj, sk)
+                    if csv_cta:
+                        break
+                if csv_cta:
+                    break
+            if csv_cta:
+                cta_block = csv_cta
+                st.info("CTA source: Centralized CSV (project_cta_links)")
+        except Exception as e:
+            st.warning(f"Failed to get CTA from centralized CSV: {e}")
+    # 2) Fallback to Google Sheet row + LLM/rules if CSV not available or missing
+    if not cta_block and cta_row:
+        try:
+            cta_block = llm_generate_thai_cta(
+                project_name=project_name,
+                site_key=site_key,
+                main_keyword=main_keyword,
+                cta_row=cta_row,
+            ) or build_cta_paragraphs(project_name=project_name, site_key=site_key, cta_row=cta_row)
+            if cta_block:
+                st.info("CTA source: Google Sheet + LLM/rules")
+        except Exception as e:
+            st.warning(f"Failed to build CTA from Google Sheet data: {e}")
+    # 3) Final fallback: manual CTA HTML if user provided
+    if not cta_block:
         manual_cta_html = st.session_state.get("manual_cta_html", "").strip()
         if manual_cta_html:
             cta_block = manual_cta_html
+            st.info("CTA source: Manual HTML from session")
 
     # Decide whether to REPLACE the last section (if it's already a how-to-buy CTA) or APPEND a new final CTA
     if cta_block:
