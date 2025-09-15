@@ -10,6 +10,8 @@ from requests.auth import HTTPBasicAuth
 import json
 import re
 import time
+from urllib.parse import urlparse
+import csv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -77,16 +79,23 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
         st.error(f"Exception during image upload to {wp_url}: {e}")
         return None
 
+
 # ===================================================
 # --- Image Processing (resize/optimize for WordPress)
 # ===================================================
-def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_16_9=False):
+def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_16_9=False, max_size_kb=100):
     """
     Optimizes for WP and (optionally) hard-enforces 16:9 landscape by center-cropping.
+    Adds a hard cap on output size via iterative JPEG compression and optional downscale.
+
+    Rules (unchanged):
     - Landscape images: Max width 1200px
     - Portrait images: Max height 675px (16:9 ratio)
     - Very wide banners: Max width 1400px, min height 300px
     - Very tall images: Max height 800px, min width 400px
+
+    New:
+    - Ensure final file size <= max_size_kb by reducing quality stepwise, then downscaling if necessary.
     """
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -116,7 +125,7 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
                 w, h = img.size
                 aspect_ratio = w / float(h)
 
-        # --- Resize rules (unchanged) ---
+        # --- Resize rules (same as before) ---
         if aspect_ratio >= 2.5:
             max_width = 1400
             min_height = 300
@@ -148,6 +157,7 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             else:
                 new_width, new_height = w, h
 
+        # do initial resize (if needed)
         if new_width != w or new_height != h:
             img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
             st.info(f"Resized from {w}×{h} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
@@ -155,8 +165,49 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             img_resized = img
             st.info(f"Image kept at {w}×{h} (aspect ratio: {aspect_ratio:.2f})")
 
-        out = BytesIO()
-        img_resized.save(out, format="JPEG", quality=final_quality, optimize=True)
+        # --- Iterative compression under max size ---
+        target_bytes = max_size_kb * 1024
+        min_quality = 20
+        quality_step = 5
+        quality = max(10, min(95, int(final_quality)))
+
+        def save_to_buffer(im, q):
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=q, optimize=True)
+            buf.seek(0)
+            return buf
+
+        out = save_to_buffer(img_resized, quality)
+        cur_size = out.getbuffer().nbytes
+
+        # 1) reduce quality down to min_quality
+        while cur_size > target_bytes and quality > min_quality:
+            quality = max(min_quality, quality - quality_step)
+            out = save_to_buffer(img_resized, quality)
+            cur_size = out.getbuffer().nbytes
+
+        # 2) if still too big, progressively downscale by 90% until under cap or min dims reached
+        min_w, min_h = 640, 360  # keep thumbnails reasonably sharp for 16:9
+        ds_img = img_resized
+        while cur_size > target_bytes and (ds_img.width > min_w and ds_img.height > min_h):
+            new_w = max(min_w, int(ds_img.width * 0.9))
+            new_h = max(min_h, int(ds_img.height * 0.9))
+            ds_img = ds_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            # after downscale, try a slightly higher quality first for better visuals, then drop if needed
+            trial_quality = min(quality + 5, 85)
+            out = save_to_buffer(ds_img, trial_quality)
+            cur_size = out.getbuffer().nbytes
+            # if still too big, drop quality again
+            while cur_size > target_bytes and trial_quality > min_quality:
+                trial_quality = max(min_quality, trial_quality - quality_step)
+                out = save_to_buffer(ds_img, trial_quality)
+                cur_size = out.getbuffer().nbytes
+            # update quality for next loop
+            quality = trial_quality
+
+        final_w, final_h = ds_img.size
+        final_kb = cur_size // 1024
+        st.info(f"Final saved size: {final_kb} KB at quality {quality} — {final_w}×{final_h}")
         out.seek(0)
         return out
 
@@ -169,6 +220,353 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
         except Exception as debug_e:
             st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
+
+
+# ===================================================
+# --- Bulk Optimization Helpers (No admin/plugin required)
+# ===================================================
+def is_image_url(url):
+    try:
+        return bool(re.search(r"\.(?:jpg|jpeg|png|webp)(?:\?|$)", url, flags=re.IGNORECASE))
+    except Exception:
+        return False
+
+
+def get_filename_from_url(url):
+    try:
+        path = urlparse(url).path
+        name = os.path.basename(path)
+        return name or f"image_{int(time.time())}.jpg"
+    except Exception:
+        return f"image_{int(time.time())}.jpg"
+
+
+def download_image(url, timeout=30):
+    try:
+        r = requests.get(url, timeout=timeout)
+        if r.status_code == 200 and r.content:
+            return r.content
+        else:
+            st.warning(f"Failed to download image: {url} (status {r.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Error downloading image {url}: {e}")
+        return None
+
+
+def wp_auth(site_config):
+    return HTTPBasicAuth(site_config["username"], site_config["password"])
+
+
+def wp_get(endpoint, site_config, params=None):
+    try:
+        url = construct_endpoint(site_config["url"], endpoint)
+        resp = requests.get(url, params=params or {}, auth=wp_auth(site_config), timeout=30)
+        return resp
+    except Exception as e:
+        st.error(f"GET {endpoint} failed: {e}")
+        return None
+
+
+def wp_post(endpoint, site_config, json_body=None):
+    try:
+        url = construct_endpoint(site_config["url"], endpoint)
+        resp = requests.post(url, json=json_body or {}, auth=wp_auth(site_config), timeout=30)
+        return resp
+    except Exception as e:
+        st.error(f"POST {endpoint} failed: {e}")
+        return None
+
+
+def replace_in_posts_pages_blocks(site_config, old_to_new_map, dry_run=True, max_pages=25):
+    """
+    Searches posts, pages, and reusable blocks for occurrences of old image URLs
+    and replaces them with new URLs. Returns a log list of actions.
+    """
+    logs = []
+
+    def process_collection(collection):
+        page = 1
+        while page <= max_pages:
+            resp = wp_get(f"/wp-json/wp/v2/{collection}", site_config, params={"per_page": 50, "page": page, "orderby": "date", "order": "desc"})
+            if not resp or resp.status_code not in (200, 201):
+                break
+            items = resp.json()
+            if not items:
+                break
+            for item in items:
+                item_id = item.get("id")
+                content_obj = item.get("content") or {}
+                original = content_obj.get("rendered", "")
+                if not original:
+                    continue
+                updated = original
+                replaced_any = False
+                for old_url, new_url in old_to_new_map.items():
+                    if old_url in updated:
+                        updated = updated.replace(old_url, new_url)
+                        replaced_any = True
+                if replaced_any and updated != original:
+                    if dry_run:
+                        logs.append({
+                            "type": collection,
+                            "id": item_id,
+                            "action": "would_update",
+                            "replacements": [k for k, v in old_to_new_map.items() if k in original]
+                        })
+                    else:
+                        upd = wp_post(f"/wp-json/wp/v2/{collection}/{item_id}", site_config, json_body={"content": updated})
+                        if upd and upd.status_code in (200, 201):
+                            logs.append({"type": collection, "id": item_id, "action": "updated"})
+                        else:
+                            logs.append({"type": collection, "id": item_id, "action": "failed", "status": getattr(upd, 'status_code', None), "resp": getattr(upd, 'text', None)})
+            page += 1
+
+    # Process posts, pages, and blocks (reusable blocks)
+    for col in ("posts", "pages", "blocks"):
+        process_collection(col)
+
+    return logs
+
+
+# ==========================================
+# --- CSV-driven bulk (posts/pages only)
+# ==========================================
+def _load_csv_records_from_str(csv_text):
+    """
+    Load CSV text and return list of dict rows with required headers:
+    Page_or_Post, Image_URL, Image_Size
+    """
+    try:
+        reader = csv.DictReader(csv_text.splitlines())
+        required = {"Page_or_Post", "Image_URL", "Image_Size"}
+        if not required.issubset(set(reader.fieldnames or [])):
+            missing = required - set(reader.fieldnames or [])
+            raise ValueError(f"CSV missing required columns: {', '.join(sorted(missing))}")
+        rows = []
+        for r in reader:
+            rows.append({
+                "Page_or_Post": (r.get("Page_or_Post") or "").strip(),
+                "Image_URL": (r.get("Image_URL") or "").strip(),
+                "Image_Size": r.get("Image_Size")
+            })
+        return rows
+    except Exception as e:
+        st.error(f"Failed to parse CSV: {e}")
+        return []
+
+
+def bulk_optimize_from_csv(site_key, csv_rows, dry_run=True, row_limit=5, min_size_kb=150):
+    """
+    Build a targeted run from CSV rows.
+    - Keep rows where Image_Size >= min_size_kb
+    - Deduplicate images by URL path
+    - Process first N unique images (row_limit)
+    - Targeted pages only: use Page_or_Post URLs from those selected rows
+    Reuses bulk_optimize_urls() underneath.
+    """
+    # Filter rows by size and basic URL checks
+    filtered = []
+    for r in csv_rows:
+        try:
+            size_val = r.get("Image_Size")
+            size_int = int(str(size_val).strip()) if size_val is not None and str(size_val).strip().isdigit() else None
+        except Exception:
+            size_int = None
+        img_url = r.get("Image_URL") or ""
+        page_url = r.get("Page_or_Post") or ""
+        if not (img_url.startswith("http") and page_url.startswith("http")):
+            continue
+        if size_int is not None and size_int < (min_size_kb * 1024):
+            continue
+        # Skip obvious archives/taxonomy for targeted list
+        if not slug_from_url(page_url):
+            continue
+        if not is_image_url(img_url):
+            continue
+        filtered.append({"Image_URL": img_url, "Page_or_Post": page_url})
+
+    # Deduplicate images by path, retain insertion order
+    seen_paths = set()
+    selected_images = []  # ordered unique images
+    image_to_pages = {}
+    for r in filtered:
+        path = urlparse(r["Image_URL"]).path
+        if path not in seen_paths:
+            if len(selected_images) < row_limit:
+                selected_images.append(r["Image_URL"])  # preserve order
+                seen_paths.add(path)
+        # Map pages only for images we decided to handle
+        if r["Image_URL"] in selected_images:
+            image_to_pages.setdefault(r["Image_URL"], set()).add(r["Page_or_Post"])
+
+    # Build union of targeted pages for chosen images
+    targeted_pages = []
+    for img in selected_images:
+        targeted_pages.extend(sorted(image_to_pages.get(img, [])))
+    targeted_pages = sorted(set(targeted_pages))
+
+    if not selected_images:
+        st.info("CSV produced no candidates after filtering. Adjust size threshold or row limit.")
+        return {}, []
+
+    # Reuse the core pipeline
+    return bulk_optimize_urls(
+        site_key,
+        input_urls=selected_images,
+        dry_run=dry_run,
+        targeted_page_urls=targeted_pages,
+        only_targeted=True,
+    )
+def bulk_optimize_urls(site_key, input_urls, dry_run=True, targeted_page_urls=None, only_targeted=False):
+    """
+    - Deduplicate image URLs
+    - Download, optimize, upload
+    - Build old->new URL map
+    - Replace references in posts/pages/blocks
+    Returns (map, logs)
+    """
+    site_config = WP_SITES.get(site_key)
+    if not site_config or not all(site_config.get(k) for k in ["url", "username", "password"]):
+        st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+        return {}, []
+
+    # Separate image URLs vs page URLs; for pages we won't process directly, references are handled by replacements.
+    image_urls = []
+    for u in input_urls:
+        if is_image_url(u):
+            image_urls.append(u)
+
+    # De-duplicate by final filename path
+    dedup_map = {}
+    for u in image_urls:
+        dedup_map[urlparse(u).path] = u
+    unique_image_urls = list(dedup_map.values())
+
+    old_to_new = {}
+    for url in unique_image_urls:
+        st.write(f"Processing image: {url}")
+        img_bytes = download_image(url)
+        if not img_bytes:
+            continue
+        processed = process_image_for_wordpress(img_bytes)
+        if not processed:
+            continue
+        if dry_run:
+            # In dry-run, estimate filename but do not upload
+            suggested_name = get_filename_from_url(url)
+            st.info(f"Dry-run: would upload optimized image as {suggested_name}")
+            # We cannot know new URL without upload; skip mapping creation in dry-run
+            continue
+        processed.seek(0)
+        # Upload optimized image
+        filename = get_filename_from_url(url)
+        up = upload_image_to_wordpress(
+            image_bytes=processed.getvalue(),
+            wp_url=site_config["url"],
+            username=site_config["username"],
+            wp_app_password=site_config["password"],
+            filename=filename,
+            alt_text=os.path.splitext(filename)[0].replace('-', ' ').replace('_', ' ')
+        )
+        if up and up.get("source_url"):
+            old_to_new[url] = up["source_url"]
+        else:
+            st.warning(f"Upload failed for {url}")
+
+    logs = []
+    if old_to_new:
+        if only_targeted and targeted_page_urls:
+            st.write("Replacing references in specified pages only...")
+            logs = replace_in_specific_urls(site_config, targeted_page_urls, old_to_new, dry_run=dry_run)
+        elif not dry_run:
+            st.write("Replacing references across posts/pages/blocks...")
+            logs = replace_in_posts_pages_blocks(site_config, old_to_new, dry_run=False)
+
+    return old_to_new, logs
+
+
+# ================================
+# --- Targeted replacement helpers
+# ================================
+def normalize_wp_path(path):
+    # strip trailing slashes and pagination
+    p = re.sub(r"/page/\d+/?$", "/", path.rstrip('/'))
+    if not p.endswith('/'):
+        p += '/'
+    return p
+
+
+def is_archive_or_taxonomy_path(path):
+    # Heuristics: category/tag/author/date archives
+    return bool(re.search(r"/(category|tag|author|date|\d{4}/\d{2})/", path))
+
+
+def slug_from_url(url):
+    try:
+        parsed = urlparse(url)
+        path = normalize_wp_path(parsed.path)
+        # Remove optional /th prefix
+        parts = [p for p in path.split('/') if p]
+        if not parts:
+            return None
+        if parts[0] == 'th' and len(parts) >= 2:
+            parts = parts[1:]
+        # skip obvious archives
+        if is_archive_or_taxonomy_path('/' + '/'.join(parts) + '/'):
+            return None
+        # last part is slug for posts/pages like /th/my-post/
+        return parts[-1]
+    except Exception:
+        return None
+
+
+def fetch_item_by_slug(site_config, slug):
+    # Try pages then posts by slug
+    for collection in ("pages", "posts"):
+        resp = wp_get(f"/wp-json/wp/v2/{collection}", site_config, params={"slug": slug})
+        if resp and resp.status_code == 200:
+            items = resp.json() or []
+            if items:
+                item = items[0]
+                return collection, item
+    return None, None
+
+
+def replace_in_specific_urls(site_config, page_urls, old_to_new_map, dry_run=True):
+    logs = []
+    for url in page_urls:
+        s = slug_from_url(url)
+        if not s:
+            logs.append({"url": url, "action": "skipped_non_editable_or_no_slug"})
+            continue
+        collection, item = fetch_item_by_slug(site_config, s)
+        if not item:
+            logs.append({"url": url, "slug": s, "action": "not_found"})
+            continue
+        item_id = item.get("id")
+        original = (item.get("content") or {}).get("rendered", "")
+        if not original:
+            logs.append({"url": url, "slug": s, "type": collection, "id": item_id, "action": "no_rendered_content"})
+            continue
+        updated = original
+        replaced_any = False
+        for old_url, new_url in old_to_new_map.items():
+            if old_url in updated:
+                updated = updated.replace(old_url, new_url)
+                replaced_any = True
+        if not replaced_any:
+            logs.append({"url": url, "slug": s, "type": collection, "id": item_id, "action": "no_matches"})
+            continue
+        if dry_run:
+            logs.append({"url": url, "slug": s, "type": collection, "id": item_id, "action": "would_update"})
+        else:
+            upd = wp_post(f"/wp-json/wp/v2/{collection}/{item_id}", site_config, json_body={"content": updated})
+            if upd and upd.status_code in (200, 201):
+                logs.append({"url": url, "slug": s, "type": collection, "id": item_id, "action": "updated"})
+            else:
+                logs.append({"url": url, "slug": s, "type": collection, "id": item_id, "action": "failed", "status": getattr(upd, 'status_code', None)})
+    return logs
 
 
 # ========================================
@@ -720,3 +1118,85 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
                     )
             else:
                 st.error(f"Missing or incomplete configuration for {site_key}. Check .env file.")
+
+# ----------------------------------------------
+# --- Section: Bulk Optimize Existing Media URLs
+# ----------------------------------------------
+st.markdown("---")
+st.header("Bulk Optimize Existing Media (No plugin)")
+st.caption("Paste image and/or page URLs. Images will be optimized and uploaded; references in posts/pages/blocks will be updated to the new URLs. Use Dry run first.")
+
+with st.form("bulk_optimize_form"):
+    site_keys = list(WP_SITES.keys())
+    default_site_index = site_keys.index("cryptonews") if "cryptonews" in site_keys else 0
+    selected_site = st.selectbox("Target WordPress Site", site_keys, index=default_site_index)
+    urls_input = st.text_area(
+        "Image or mixed URLs (one per line)",
+        height=150,
+        placeholder="https://cimg.co/wp-content/uploads/.../big-image.jpg\nhttps://cimg.co/wp-content/uploads/.../another.jpg"
+    )
+    targeted_pages_input = st.text_area(
+        "Targeted Page/Post URLs to update (optional, one per line)",
+        height=120,
+        placeholder="https://cryptonews.com/th/cryptocurrency/solaxy-launch-date/\nhttps://cryptonews.com/th/fantasy-games-2025/"
+    )
+    only_targeted = st.checkbox("Only update specified pages (skip site-wide scan)", value=True)
+    dry_run_mode = st.checkbox("Dry run (analyze only, no uploads or edits)", value=True)
+    run_bulk = st.form_submit_button("Run Bulk Optimize", use_container_width=True)
+
+if run_bulk:
+    raw_lines = [line.strip() for line in urls_input.splitlines() if line.strip()]
+    # Also split lines by spaces or commas to be forgiving
+    all_urls = []
+    for line in raw_lines:
+        for part in re.split(r"[\s,]+", line):
+            if part and part.startswith("http"):
+                all_urls.append(part)
+    targeted_pages = [l.strip() for l in targeted_pages_input.splitlines() if l.strip().startswith("http")]
+    if not all_urls:
+        st.warning("Please provide at least one valid http(s) URL.")
+    else:
+        with st.spinner("Running bulk optimization..."):
+            mapping, logs = bulk_optimize_urls(
+                selected_site,
+                all_urls,
+                dry_run=dry_run_mode,
+                targeted_page_urls=targeted_pages,
+                only_targeted=only_targeted
+            )
+        if dry_run_mode:
+            st.success("Dry-run complete. No uploads or content edits were made.")
+            if mapping:
+                st.write("(Dry-run) Old -> New mapping (if any)")
+                st.json(mapping)
+            if logs:
+                st.write("Planned content updates:")
+                st.json(logs)
+            else:
+                if only_targeted:
+                    st.info("No matches found in targeted pages.")
+        else:
+            with st.spinner("Running CSV-driven optimization..."):
+                mapping, logs = bulk_optimize_from_csv(
+                    site_key=csv_site,
+                    csv_rows=rows,
+                    dry_run=csv_dry_run,
+                    row_limit=int(row_limit),
+                    min_size_kb=int(min_kb),
+                )
+            if csv_dry_run:
+                st.success("Dry-run complete. No uploads or content edits were made.")
+                if mapping:
+                    st.write("(Dry-run) Old -> New mapping (if any)")
+                    st.json(mapping)
+                if logs:
+                    st.write("Planned content updates:")
+                    st.json(logs)
+            else:
+                st.success("CSV-driven optimization complete.")
+                if mapping:
+                    st.write("Old -> New image URL mapping:")
+                    st.json(mapping)
+                if logs:
+                    st.write("Content update logs:")
+                    st.json(logs)
