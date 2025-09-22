@@ -40,7 +40,8 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
             media_endpoint,
             files=files,
             data=data_payload,
-            auth=HTTPBasicAuth(username, wp_app_password)
+            auth=HTTPBasicAuth(username, wp_app_password),
+            timeout=60
         )
 
         if response.status_code in (200, 201):
@@ -60,9 +61,10 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
                 update_response = requests.post(
                     update_endpoint,
                     json=update_payload,
-                    auth=HTTPBasicAuth(username, wp_app_password)
+                    auth=HTTPBasicAuth(username, wp_app_password),
+                    timeout=60
                 )
-                if update_response.status_code in (200, 201, 200):
+                if update_response.status_code in (200, 201):
                     st.success(f"Image uploaded and metadata updated for {wp_url}. Media ID: {media_id}")
                 else:
                     st.warning(f"Image uploaded to {wp_url} (ID: {media_id}), but metadata update failed. "
@@ -85,14 +87,12 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
     Optimizes for WP and (optionally) hard-enforces 16:9 landscape by center-cropping.
     Adds a hard cap on output size via iterative JPEG compression and optional downscale.
 
-    Rules (unchanged):
+    Rules:
     - Landscape images: Max width 1200px
     - Portrait images: Max height 675px (16:9 ratio)
     - Very wide banners: Max width 1400px, min height 300px
     - Very tall images: Max height 800px, min width 400px
-
-    New:
-    - Ensure final file size <= max_size_kb by reducing quality stepwise, then downscaling if necessary.
+    - Ensure final file size <= max_size_kb via compression and downscale
     """
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -110,19 +110,17 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             eps = 0.01
             if abs(aspect_ratio - target) > eps:
                 if aspect_ratio > target:
-                    # too wide -> crop width
                     new_w = int(h * target)
                     left = max((w - new_w) // 2, 0)
                     img = img.crop((left, 0, left + new_w, h))
                 else:
-                    # too tall -> crop height
                     new_h = int(w / target)
                     top = max((h - new_h) // 2, 0)
                     img = img.crop((0, top, w, top + new_h))
                 w, h = img.size
                 aspect_ratio = w / float(h)
 
-        # --- Resize rules (same as before) ---
+        # --- Resize rules ---
         if aspect_ratio >= 2.5:
             max_width = 1400
             min_height = 300
@@ -154,7 +152,6 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             else:
                 new_width, new_height = w, h
 
-        # do initial resize (if needed)
         if new_width != w or new_height != h:
             img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
             st.info(f"Resized from {w}×{h} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
@@ -162,7 +159,6 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             img_resized = img
             st.info(f"Image kept at {w}×{h} (aspect ratio: {aspect_ratio:.2f})")
 
-        # --- Iterative compression under max size ---
         target_bytes = max_size_kb * 1024
         min_quality = 20
         quality_step = 5
@@ -177,29 +173,26 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
         out = save_to_buffer(img_resized, quality)
         cur_size = out.getbuffer().nbytes
 
-        # 1) reduce quality down to min_quality
+        # reduce quality down to min_quality
         while cur_size > target_bytes and quality > min_quality:
             quality = max(min_quality, quality - quality_step)
             out = save_to_buffer(img_resized, quality)
             cur_size = out.getbuffer().nbytes
 
-        # 2) if still too big, progressively downscale by 90% until under cap or min dims reached
-        min_w, min_h = 640, 360  # keep thumbnails reasonably sharp for 16:9
+        # downscale loop if still too big
+        min_w, min_h = 640, 360
         ds_img = img_resized
         while cur_size > target_bytes and (ds_img.width > min_w and ds_img.height > min_h):
             new_w = max(min_w, int(ds_img.width * 0.9))
             new_h = max(min_h, int(ds_img.height * 0.9))
             ds_img = ds_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            # after downscale, try a slightly higher quality first for better visuals, then drop if needed
             trial_quality = min(quality + 5, 85)
             out = save_to_buffer(ds_img, trial_quality)
             cur_size = out.getbuffer().nbytes
-            # if still too big, drop quality again
             while cur_size > target_bytes and trial_quality > min_quality:
                 trial_quality = max(min_quality, trial_quality - quality_step)
                 out = save_to_buffer(ds_img, trial_quality)
                 cur_size = out.getbuffer().nbytes
-            # update quality for next loop
             quality = trial_quality
 
         final_w, final_h = ds_img.size
@@ -217,7 +210,6 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
         except Exception as debug_e:
             st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
-
 
 # ========================================
 # --- Providers: Together, OpenAI, OpenRouter
@@ -255,12 +247,96 @@ WP_SITES = {
     }
 }
 
+# ---------- Prompt Engineering (NEW) ----------
+FLUX_ENGINEER_SYSTEM = (
+    "You are a Flux prompt engineer. Follow these rules:\n\n"
+    "1. Language Handling:\n"
+    "    - If the prompt is in Thai, translate it to English before applying the remaining rules.\n"
+    "    - If the prompt is not in Thai, proceed to the next set of rules.\n\n"
+    "2. Representing Thai Individuals:\n"
+    "    - If the prompt is in Thai or requests Thai individuals, ensure that the people in the image appear ethnically Thai, reflecting typical Thai features such as facial structure, and contemporary attire appropriate to the context.\n"
+    "    - If the prompt does not specify Thai individuals then proceed without enforcing Thai representation.\n\n"
+    "3. Scene Enhancement:\n"
+    "   - Add specific lighting and atmosphere details\n"
+    "   - Include natural elements and textures\n"
+    "   - Specify basic camera angle and composition\n"
+    "   - Keep the enhancement focused on the main subject\n\n"
+    "4. Quality Focus:\n"
+    "   - Include technical details such as aperture, lens, and shot type.\n"
+    "   - End the prompt with \"photo-realistic style\" unless otherwise specified.\n\n"
+    "Provide only the enhanced prompt without explanations."
+)
+
+def _openrouter_headers():
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_SITE_NAME:
+        headers["X-Title"] = OPENROUTER_SITE_NAME
+    return headers
+
+def enhance_prompt_with_role(user_prompt: str) -> str:
+    """
+    Return engineered prompt string. Prefer OpenAI; fallback to OpenRouter.
+    If both unavailable or any failure occurs, return the original user_prompt.
+    """
+    try:
+        # Prefer OpenAI if available
+        if OPENAI_API_KEY:
+            client = OpenAI()
+            resp = client.chat.completions.create(
+                model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": FLUX_ENGINEER_SYSTEM},
+                    {"role": "user", "content": user_prompt.strip()}
+                ],
+            )
+            out = (resp.choices[0].message.content or "").strip()
+            if out:
+                return out
+
+        # Fallback to OpenRouter
+        if OPENROUTER_API_KEY:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            payload = {
+                "model": os.getenv("OPENROUTER_TEXT_MODEL", "openai/gpt-4o-mini"),
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": FLUX_ENGINEER_SYSTEM},
+                    {"role": "user", "content": user_prompt.strip()}
+                ],
+            }
+            resp = requests.post(url, headers=_openrouter_headers(), data=json.dumps(payload), timeout=60)
+            if resp.status_code == 200:
+                j = resp.json()
+                content = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                if content:
+                    return content
+            else:
+                st.warning(f"OpenRouter text LLM error: {resp.status_code} - {resp.text[:300]}")
+
+    except Exception as e:
+        st.warning(f"Prompt engineering failed, using raw prompt. Reason: {e}")
+
+    return user_prompt.strip()
+
+# =========================================
+# --- Image generation functions (unchanged)
+# =========================================
+
 def generate_image_together_ai(prompt, width=1792, height=1024):
     """
     Generate image using Together AI's FLUX.1-schnell-Free.
     Returns image bytes or None if failed.
     """
     try:
+        if not TOGETHER_API_KEY:
+            st.error("Together API key missing.")
+            return None
         url = "https://api.together.xyz/v1/images/generations"
         headers = {
             "Authorization": f"Bearer {TOGETHER_API_KEY}",
@@ -275,7 +351,7 @@ def generate_image_together_ai(prompt, width=1792, height=1024):
             "n": 1,
             "response_format": "b64_json"
         }
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
         if response.status_code == 200:
             result = response.json()
             if result.get("data"):
@@ -297,6 +373,9 @@ def generate_image_openai(prompt, size="1536x1024"):
     Returns image bytes or None if failed.
     """
     try:
+        if not OPENAI_API_KEY:
+            st.error("OpenAI API key missing.")
+            return None
         client = OpenAI()  # Uses OPENAI_API_KEY from env
         response = client.images.generate(
             model="gpt-image-1",
@@ -314,14 +393,10 @@ def generate_image_openai(prompt, size="1536x1024"):
         st.error(f"Failed to generate image with OpenAI: {e}")
         return None
 
-# ---------- OpenRouter (Gemini 2.5 Flash Image Preview) ----------
 def _extract_openrouter_image_bytes(resp_json):
     """
     Extract image bytes from OpenRouter chat/completions responses for image models.
-    Supports all observed shapes:
-      1) choices[0].message.images[].image_url.url  (can be https:// or data:image/...;base64,...)
-      2) choices[0].message.content: list of parts with image_url / image_base64 / b64_json
-      3) choices[0].message.content: str containing a data URL
+    Supports multiple shapes.
     """
     try:
         choices = resp_json.get("choices", [])
@@ -330,7 +405,6 @@ def _extract_openrouter_image_bytes(resp_json):
 
         msg = choices[0].get("message", {}) or {}
 
-        # --- Case 1: explicit "images" array (Google provider often uses this) ---
         imgs = msg.get("images")
         if isinstance(imgs, list) and imgs:
             for it in imgs:
@@ -340,31 +414,25 @@ def _extract_openrouter_image_bytes(resp_json):
                 url = iu.get("url")
                 if not url:
                     continue
-                # data URL (base64 inline)
                 if url.startswith("data:image/"):
-                    # e.g. data:image/png;base64,AAAA...
                     m = re.search(r"base64,([A-Za-z0-9+/=]+)$", url)
                     if m:
                         return base64.b64decode(m.group(1))
-                # remote URL
                 try:
                     r = requests.get(url, timeout=30)
                     if r.status_code == 200:
                         return r.content
                 except Exception:
-                    pass  # move on to other shapes
+                    pass
 
-        # --- Case 2: content as list of parts ---
         content = msg.get("content")
         if isinstance(content, list):
             for part in content:
                 if not isinstance(part, dict):
                     continue
-                # base64 variants
                 for key in ("image_base64", "b64", "b64_json"):
                     if key in part and part[key]:
                         return base64.b64decode(part[key])
-                # url variant
                 if "image_url" in part and isinstance(part["image_url"], dict):
                     url = part["image_url"].get("url")
                     if url:
@@ -379,7 +447,6 @@ def _extract_openrouter_image_bytes(resp_json):
                         except Exception:
                             pass
 
-        # --- Case 3: content as a single string containing a data URL ---
         if isinstance(content, str) and content:
             m = re.search(r'data:image/(?:png|jpeg|jpg);base64,([A-Za-z0-9+/=]+)', content)
             if m:
@@ -389,32 +456,23 @@ def _extract_openrouter_image_bytes(resp_json):
     except Exception:
         return None
 
-
 def generate_image_openrouter(prompt, width=1536, height=1024):
     """
     Generate image using OpenRouter (google/gemini-2.5-flash-image-preview).
     Returns image bytes or None.
     """
     try:
+        if not OPENROUTER_API_KEY:
+            st.error("OpenRouter API key missing.")
+            return None
         url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        # Optional ranking headers
-        if OPENROUTER_SITE_URL:
-            headers["HTTP-Referer"] = OPENROUTER_SITE_URL
-        if OPENROUTER_SITE_NAME:
-            headers["X-Title"] = OPENROUTER_SITE_NAME
+        headers = _openrouter_headers()
 
         messages = [
             {
                 "role": "system",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": "You are an image generation model. Return exactly one image and no extra text."
-                    }
+                    {"type": "text", "text": "You are an image generation model. Return exactly one image and no extra text."}
                 ],
             },
             {
@@ -461,8 +519,6 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         st.error(f"Error calling OpenRouter API: {e}")
         return None
 
-
-
 # ==========================================
 # --- Session state for active/generated image
 # ==========================================
@@ -484,6 +540,8 @@ if 'current_hdr_grading' not in st.session_state:
     st.session_state.current_hdr_grading = False
 if 'last_used_provider' not in st.session_state:
     st.session_state.last_used_provider = None
+if 'last_engineered_prompt' not in st.session_state:
+    st.session_state.last_engineered_prompt = ""
 
 st.title("AI Image Generator & WordPress Uploader")
 
@@ -505,10 +563,11 @@ if together_available or openai_available or openrouter_available:
         col_left, col_right = st.columns([3, 2])
 
         with col_left:
-            prompt_text = st.text_area("Enter your image prompt (English only).", height=140, key="prompt_input")
+            prompt_text = st.text_area("Enter your image prompt (Thai or English).", height=140, key="prompt_input")
             ai_alt_text = st.text_area("Enter alt text for the generated image:", height=120, key="ai_alt_text_input")
 
         with col_right:
+            use_flux_engineer = st.checkbox("Use Flux Prompt Engineer (recommended)", value=True, key="use_flux_engineer_checkbox")
             add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
             add_hdr_grading = st.checkbox("High dynamic range with vivid and rich color grading", key="hdr_grading_checkbox")
             add_visually_striking_prefix = st.checkbox("Start with 'A visually striking image of...'", value=True, key="visually_striking_checkbox")
@@ -521,14 +580,14 @@ if together_available or openai_available or openrouter_available:
 
             # Provider options (include OpenRouter)
             provider_options = []
-            default_index = 0
             if together_available:
                 provider_options.append("Flux model (Free)")
             if openai_available:
                 provider_options.append("OpenAI ($0.30 per image)")
             if openrouter_available:
                 provider_options.append("Nano Banana ( $0.03 per image)")
-            # Set default to Together if present, else first available
+            provider = provider_options[0] if provider_options else None
+
             if provider_options:
                 provider = st.radio("Choose AI Provider:", provider_options, index=0, key="provider_selection")
             else:
@@ -546,17 +605,31 @@ if together_available or openai_available or openrouter_available:
             st.session_state.active_image_alt_text = None
             st.session_state.user_uploaded_raw_bytes = None
             st.session_state.user_uploaded_alt_text_input = ""
+            st.session_state.last_engineered_prompt = ""
 
-            # Compose final prompt
-            final_prompt = prompt_text
+            # 1) Optionally engineer the prompt via LLM role
+            base_prompt = prompt_text.strip()
+            if use_flux_engineer:
+                with st.spinner("Engineering prompt..."):
+                    engineered = enhance_prompt_with_role(base_prompt)
+                    st.session_state.last_engineered_prompt = engineered
+                    final_prompt = engineered
+            else:
+                final_prompt = base_prompt
+
+            # Ensure optional prefix only when user didn't already engineer one with similar lead
             if add_visually_striking_prefix:
                 lower_pt = final_prompt.strip().lower()
                 if not lower_pt.startswith("a visually striking image of"):
                     final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
+
+            # 2) Append site-specific background / HDR, with guardrails to avoid tinting subjects
             if add_blockchain_bg:
                 final_prompt = f"{final_prompt.rstrip('.')}. The background features a futuristic glowing blockchain motif. Apply any color scheme only to the background elements. Keep all main subjects in their natural, realistic, untinted colors with strong contrast so they pop."
+
             if add_hdr_grading:
                 final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
+
             if bg_option and bg_option != "None":
                 preset_map = {
                     "CryptoNews (Bitberry)": "Use a Bitberry-inspired purple colour scheme with modern gradients for the background only; keep all main subjects in natural, realistic, untinted colors that strongly contrast with the background so they pop.",
@@ -567,6 +640,7 @@ if together_available or openai_available or openrouter_available:
                 chosen_sentence = preset_map.get(bg_option)
                 if chosen_sentence:
                     text = final_prompt.strip()
+                    # Remove any pre-existing background/color-scheme sentences to avoid duplication
                     sentence_end = r"(?<=[.!?])\s+"
                     sentences = re.split(sentence_end, text)
                     filtered = []
@@ -577,6 +651,10 @@ if together_available or openai_available or openrouter_available:
                         if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
                             continue
                         if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
+                            continue
+                        if re.search(r"blockchain motif", s_stripped, flags=re.IGNORECASE) and add_blockchain_bg:
+                            # keep the motif sentence; don't drop it
+                            filtered.append(s_stripped)
                             continue
                         filtered.append(s_stripped)
                     cleaned = ". ".join(filtered).strip()
@@ -597,7 +675,6 @@ if together_available or openai_available or openrouter_available:
             elif provider == "Nano Banana ( $0.03 per image)" and openrouter_available:
                 st.session_state.last_used_provider = "OpenRouter"
                 with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
-                    # Width/height are advisory; model may choose its own.
                     image_bytes_from_api = generate_image_openrouter(final_prompt, width=1536, height=1024)
             else:
                 st.error("Selected provider is not available. Check your API keys.")
@@ -605,19 +682,18 @@ if together_available or openai_available or openrouter_available:
 
             if image_bytes_from_api:
                 # Enforce 16:9 only for OpenRouter outputs
-                force_169 = (
-                    st.session_state.last_used_provider == "OpenRouter"
-                    or provider == "OpenRouter (Gemini 2.5 Image)"
-                )
+                force_169 = (st.session_state.last_used_provider == "OpenRouter")
                 final_image_bytes_io = process_image_for_wordpress(
                     image_bytes_from_api,
                     force_landscape_16_9=force_169
                 )
-            
                 if final_image_bytes_io:
                     st.session_state.active_image_bytes_io = final_image_bytes_io
                     st.session_state.active_image_alt_text = ai_alt_text
                     st.success(f"✅ Image generated successfully with {st.session_state.last_used_provider}")
+                    if st.session_state.last_engineered_prompt:
+                        with st.expander("Show engineered prompt"):
+                            st.code(st.session_state.last_engineered_prompt)
                 else:
                     st.error("Failed to process the generated image.")
             else:
@@ -665,11 +741,6 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
 
     def generate_english_filename(alt_text):
         """Generate English filename from alt text, focusing on crypto/blockchain terms"""
-        crypto_terms = [
-            'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'blockchain', 'defi', 'nft',
-            'trading', 'price', 'market', 'coin', 'token', 'altcoin', 'bull', 'bear',
-            'pump', 'dump', 'moon', 'hodl', 'analysis', 'chart', 'technical', 'news'
-        ]
         english_words = re.findall(r'[a-zA-Z]+', alt_text.lower())
         relevant_words = []
         for word in english_words:
@@ -677,10 +748,7 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
                 relevant_words.append(word)
             if len(relevant_words) >= 3:
                 break
-        if relevant_words:
-            filename_base = '_'.join(relevant_words[:3])
-        else:
-            filename_base = f"crypto_image_{int(time.time())}"
+        filename_base = '_'.join(relevant_words[:3]) if relevant_words else f"crypto_image_{int(time.time())}"
         return f"{filename_base}_processed.jpg"
 
     upload_filename = generate_english_filename(current_alt_text)
