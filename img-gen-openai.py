@@ -3,13 +3,14 @@ import os
 from dotenv import load_dotenv
 import base64
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 from openai import OpenAI
 import requests
 from requests.auth import HTTPBasicAuth
 import json
 import re
 import time
+import hashlib
 
 # Load environment variables from .env file
 load_dotenv()
@@ -40,8 +41,7 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
             media_endpoint,
             files=files,
             data=data_payload,
-            auth=HTTPBasicAuth(username, wp_app_password),
-            timeout=60
+            auth=HTTPBasicAuth(username, wp_app_password)
         )
 
         if response.status_code in (200, 201):
@@ -61,10 +61,9 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
                 update_response = requests.post(
                     update_endpoint,
                     json=update_payload,
-                    auth=HTTPBasicAuth(username, wp_app_password),
-                    timeout=60
+                    auth=HTTPBasicAuth(username, wp_app_password)
                 )
-                if update_response.status_code in (200, 201):
+                if update_response.status_code in (200, 201, 200):
                     st.success(f"Image uploaded and metadata updated for {wp_url}. Media ID: {media_id}")
                 else:
                     st.warning(f"Image uploaded to {wp_url} (ID: {media_id}), but metadata update failed. "
@@ -82,9 +81,9 @@ def upload_image_to_wordpress(image_bytes, wp_url, username, wp_app_password, fi
 # ===================================================
 # --- Image Processing (resize/optimize for WordPress)
 # ===================================================
-def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_16_9=False, max_size_kb=100):
+def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_16_9=False, max_size_kb=100, crop_strategy='crop'):
     """
-    Optimizes for WP and (optionally) hard-enforces 16:9 landscape by center-cropping.
+    Optimizes for WP and (optionally) hard-enforces 16:9 landscape by center-cropping or letterboxing.
     Adds a hard cap on output size via iterative JPEG compression and optional downscale.
 
     Rules:
@@ -92,7 +91,9 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
     - Portrait images: Max height 675px (16:9 ratio)
     - Very wide banners: Max width 1400px, min height 300px
     - Very tall images: Max height 800px, min width 400px
-    - Ensure final file size <= max_size_kb via compression and downscale
+
+    New: enforce <= max_size_kb by stepwise quality drops + downscale.
+    When force_landscape_16_9=True and crop_strategy='fit', the image is letterboxed onto a 16:9 canvas using a blurred background instead of being center-cropped.
     """
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -104,21 +105,36 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             raise ValueError("Image dimensions are invalid.")
         aspect_ratio = w / float(h)
 
+        def _letterbox_16x9(src_img, target_width=1200):
+            target_height = int(target_width * 9 / 16)
+            bg = src_img.resize((target_width, target_height), Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(20))
+            if bg.mode != 'RGB':
+                bg = bg.convert('RGB')
+            fitted = ImageOps.contain(src_img, (target_width, target_height), Image.Resampling.LANCZOS)
+            canvas = bg.copy()
+            x = (target_width - fitted.width) // 2
+            y = (target_height - fitted.height) // 2
+            canvas.paste(fitted, (x, y))
+            return canvas
+
         # --- Force 16:9 landscape if requested ---
         if force_landscape_16_9:
             target = 16.0 / 9.0
             eps = 0.01
-            if abs(aspect_ratio - target) > eps:
-                if aspect_ratio > target:
-                    new_w = int(h * target)
-                    left = max((w - new_w) // 2, 0)
-                    img = img.crop((left, 0, left + new_w, h))
-                else:
-                    new_h = int(w / target)
-                    top = max((h - new_h) // 2, 0)
-                    img = img.crop((0, top, w, top + new_h))
-                w, h = img.size
-                aspect_ratio = w / float(h)
+            if crop_strategy == 'fit':
+                pass
+            else:
+                if abs(aspect_ratio - target) > eps:
+                    if aspect_ratio > target:
+                        new_w = int(h * target)
+                        left = max((w - new_w) // 2, 0)
+                        img = img.crop((left, 0, left + new_w, h))
+                    else:
+                        new_h = int(w / target)
+                        top = max((h - new_h) // 2, 0)
+                        img = img.crop((0, top, w, top + new_h))
+                    w, h = img.size
+                    aspect_ratio = w / float(h)
 
         # --- Resize rules ---
         if aspect_ratio >= 2.5:
@@ -152,13 +168,19 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             else:
                 new_width, new_height = w, h
 
-        if new_width != w or new_height != h:
-            img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            st.info(f"Resized from {w}×{h} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
+        # Resize if needed
+        if crop_strategy == 'fit' and force_landscape_16_9:
+            img_resized = _letterbox_16x9(img, target_width=1200)
+            st.info("Letterboxed to 1200×675 (16:9) to avoid cropping.")
         else:
-            img_resized = img
-            st.info(f"Image kept at {w}×{h} (aspect ratio: {aspect_ratio:.2f})")
+            if new_width != w or new_height != h:
+                img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                st.info(f"Resized from {w}×{h} to {new_width}×{new_height} (aspect ratio: {aspect_ratio:.2f})")
+            else:
+                img_resized = img
+                st.info(f"Image kept at {w}×{h} (aspect ratio: {aspect_ratio:.2f})")
 
+        # --- Iterative compression under max size ---
         target_bytes = max_size_kb * 1024
         min_quality = 20
         quality_step = 5
@@ -173,14 +195,12 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
         out = save_to_buffer(img_resized, quality)
         cur_size = out.getbuffer().nbytes
 
-        # reduce quality down to min_quality
         while cur_size > target_bytes and quality > min_quality:
             quality = max(min_quality, quality - quality_step)
             out = save_to_buffer(img_resized, quality)
             cur_size = out.getbuffer().nbytes
 
-        # downscale loop if still too big
-        min_w, min_h = 640, 360
+        min_w, min_h = 640, 360  # keep thumbnails reasonably sharp for 16:9
         ds_img = img_resized
         while cur_size > target_bytes and (ds_img.width > min_w and ds_img.height > min_h):
             new_w = max(min_w, int(ds_img.width * 0.9))
@@ -211,61 +231,21 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
             st.caption(f"Debug Info: Error displaying debug info: {debug_e}")
         return None
 
+
 # ========================================
-# --- Providers: Together, OpenAI, OpenRouter
+# --- Providers: FAL (Seedream v4), OpenAI, OpenRouter
 # ========================================
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+FAL_API_KEY = os.getenv("FAL_API_KEY")
 
 # Optional OpenRouter ranking headers
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "")
 OPENROUTER_SITE_NAME = os.getenv("OPENROUTER_SITE_NAME", "")
 
-# WordPress Site Configurations
-WP_SITES = {
-    "cryptonews": {
-        "url": os.getenv("CRYPTONEWS_WP_URL"),
-        "username": os.getenv("CRYPTONEWS_WP_USERNAME"),
-        "password": os.getenv("CRYPTONEWS_WP_APP_PASSWORD")
-    },
-    "cryptodnes": {
-        "url": os.getenv("CRYPTODNES_WP_URL"),
-        "username": os.getenv("CRYPTODNES_WP_USERNAME"),
-        "password": os.getenv("CRYPTODNES_WP_APP_PASSWORD")
-    },
-    "icobench": {
-        "url": os.getenv("ICOBENCH_WP_URL"),
-        "username": os.getenv("ICOBENCH_WP_USERNAME"),
-        "password": os.getenv("ICOBENCH_WP_APP_PASSWORD")
-    },
-    "bitcoinist": {
-        "url": os.getenv("BITCOINIST_WP_URL"),
-        "username": os.getenv("BITCOINIST_WP_USERNAME"),
-        "password": os.getenv("BITCOINIST_WP_APP_PASSWORD")
-    }
-}
+# ---------- OpenRouter text headers helper ----------
 
-# ---------- Prompt Engineering (NEW) ----------
-FLUX_ENGINEER_SYSTEM = (
-    "You are a Flux prompt engineer. Follow these rules:\n\n"
-    "1. Language Handling:\n"
-    "    - If the prompt is in Thai, translate it to English before applying the remaining rules.\n"
-    "    - If the prompt is not in Thai, proceed to the next set of rules.\n\n"
-    "2. Representing Thai Individuals:\n"
-    "    - If the prompt is in Thai or requests Thai individuals, ensure that the people in the image appear ethnically Thai, reflecting typical Thai features such as facial structure, and contemporary attire appropriate to the context.\n"
-    "    - If the prompt does not specify Thai individuals then proceed without enforcing Thai representation.\n\n"
-    "3. Scene Enhancement:\n"
-    "   - Add specific lighting and atmosphere details\n"
-    "   - Include natural elements and textures\n"
-    "   - Specify basic camera angle and composition\n"
-    "   - Keep the enhancement focused on the main subject\n\n"
-    "4. Quality Focus:\n"
-    "   - Include technical details such as aperture, lens, and shot type.\n"
-    "   - End the prompt with \"photo-realistic style\" unless otherwise specified.\n\n"
-    "Provide only the enhanced prompt without explanations."
-)
 
 def _openrouter_headers():
     headers = {
@@ -278,10 +258,72 @@ def _openrouter_headers():
         headers["X-Title"] = OPENROUTER_SITE_NAME
     return headers
 
+# ---------- String helpers ----------
+def _slugify_english(text: str) -> str:
+    # keep ascii letters/numbers/spaces, turn spaces to hyphens, collapse repeats
+    text = re.sub(r'[^A-Za-z0-9\s-]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip().lower()
+    text = re.sub(r'\s|-+', '-', text)
+    text = re.sub(r'-{2,}', '-', text)
+    return text.strip('-') or 'image'
+
+def seo_filename_from_alt_via_openrouter(alt_text: str) -> str | None:
+    """Ask an OpenRouter text model to produce a short SEO-friendly English slug (kebab-case).
+    Returns slug string or None on failure."""
+    if not OPENROUTER_API_KEY:
+        return None
+    try:
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        system = ("You generate concise SEO-friendly image filenames. "
+                  "Output ONLY a lowercase kebab-case slug of 3-6 words, ASCII only, "
+                  "no dates, no file extension, no quotes.")
+        payload = {
+            "model": os.getenv("OPENROUTER_TEXT_MODEL", "openai/gpt-4o-mini"),
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Alt text: {alt_text}\nReturn only the slug."}
+            ],
+        }
+        resp = requests.post(url, headers=_openrouter_headers(), data=json.dumps(payload), timeout=45)
+        if resp.status_code == 200:
+            j = resp.json()
+            content = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+            if content:
+                # sanitize in case the model adds extra words
+                return _slugify_english(content)
+    except Exception:
+        pass
+    return None
+
+def generate_seo_image_name(alt_text: str, ext: str = "jpg") -> str:
+    """Create an English, SEO-friendly, unique image filename from alt text.
+    Uses OpenRouter LLM when available; falls back to local slugify.
+    Appends date (dd-mm-yyyy) and a short hash for uniqueness."""
+    slug = seo_filename_from_alt_via_openrouter(alt_text) or _slugify_english(alt_text)
+    date_str = time.strftime("%d-%m-%Y")
+    short_hash = hashlib.md5(alt_text.encode("utf-8")).hexdigest()[:6]
+    return f"{slug}-{date_str}-{short_hash}.{ext}"
+
+# ---------- Thai-aware prompt engineering system prompt ----------
+FLUX_ENGINEER_SYSTEM = (
+    "You are a prompt engineer specialized in ByteDance/Seedream v4 image generation. "
+    "Transform the user's request (Thai or English) into a single English prompt optimized for Seedream v4. "
+    "Follow Seedream best practices: be concise but specific; clearly state subject(s), attributes, actions, setting, composition, camera/shot type, lens/focal length, lighting, atmosphere, color palette, materials/textures, and style (photographic/illustration/3D). "
+    "Prefer natural, realistic renderings unless the user asks for stylization. "
+    "Avoid on-image text, watermarks, UI, logos. Do NOT add brand names unless provided by the user. "
+    "When the user implies an editorial/crypto news illustration, prefer impactful but realistic scenes. "
+    "If the user asks in Thai, translate faithfully to English while adding missing visual details. "
+    "Output: ONE paragraph in English only, no lists, no extra commentary."
+)
+
+# ---------- Prompt engineer (prefers OpenAI; falls back to OpenRouter) ----------
+
 def enhance_prompt_with_role(user_prompt: str) -> str:
     """
     Return engineered prompt string. Prefer OpenAI; fallback to OpenRouter.
     If both unavailable or any failure occurs, return the original user_prompt.
+    Accepts Thai or English; always outputs English.
     """
     try:
         # Prefer OpenAI if available
@@ -324,79 +366,185 @@ def enhance_prompt_with_role(user_prompt: str) -> str:
 
     return user_prompt.strip()
 
-# =========================================
-# --- Image generation functions (unchanged)
-# =========================================
+# WordPress Site Configurations
+WP_SITES = {
+    "cryptonews": {
+        "url": os.getenv("CRYPTONEWS_WP_URL"),
+        "username": os.getenv("CRYPTONEWS_WP_USERNAME"),
+        "password": os.getenv("CRYPTONEWS_WP_APP_PASSWORD")
+    },
+    "cryptodnes": {
+        "url": os.getenv("CRYPTODNES_WP_URL"),
+        "username": os.getenv("CRYPTODNES_WP_USERNAME"),
+        "password": os.getenv("CRYPTODNES_WP_APP_PASSWORD")
+    },
+    "icobench": {
+        "url": os.getenv("ICOBENCH_WP_URL"),
+        "username": os.getenv("ICOBENCH_WP_USERNAME"),
+        "password": os.getenv("ICOBENCH_WP_APP_PASSWORD")
+    },
+    "bitcoinist": {
+        "url": os.getenv("BITCOINIST_WP_URL"),
+        "username": os.getenv("BITCOINIST_WP_USERNAME"),
+        "password": os.getenv("BITCOINIST_WP_APP_PASSWORD")
+    }
+}
 
-def generate_image_together_ai(prompt, width=1792, height=1024):
+# -----------------------------
+# --- FAL API helpers (Seedream)
+# -----------------------------
+def _fal_post(model_path: str, payload: dict):
+    """POST to FAL model and return JSON or raise."""
+    url = f"https://fal.run/{model_path.strip('/')}"
+    headers = {
+        "Authorization": f"Key {FAL_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=180)
+    if r.status_code != 200:
+        raise RuntimeError(f"FAL API error {r.status_code}: {r.text[:500]}")
+    return r.json()
+
+def _extract_image_bytes_from_fal(resp_json: dict):
+    """Best-effort extraction supporting common FAL response shapes."""
+    # 1) images array with urls
+    try:
+        images = resp_json.get("images") or resp_json.get("output", {}).get("images")
+        if isinstance(images, list) and images:
+            first = images[0]
+            if isinstance(first, dict):
+                url = first.get("url") or first.get("image_url")
+                if url:
+                    r = requests.get(url, timeout=60)
+                    if r.status_code == 200:
+                        return r.content
+            if isinstance(first, str) and first.startswith("http"):
+                r = requests.get(first, timeout=60)
+                if r.status_code == 200:
+                    return r.content
+    except Exception:
+        pass
+
+    # 2) direct base64 field variants
+    for key in ("image", "image_base64", "b64", "b64_json"):
+        b64_val = resp_json.get(key) or resp_json.get("output", {}).get(key)
+        if b64_val:
+            try:
+                return base64.b64decode(b64_val)
+            except Exception:
+                pass
+
+    return None
+
+def generate_image_fal_seedream(prompt, width=1536, height=1024):
     """
-    Generate image using Together AI's FLUX.1-schnell-Free.
+    Generate image using FAL Seedream v4 text-to-image.
+    Note: FAL Seedream expects `image_size` as one of the presets: 'square_hd', 'square', 'portrait_4_3', 'portrait_16_9', 'landscape_4_3', 'landscape_16_9'. We use 'landscape_16_9' for site thumbnails.
     Returns image bytes or None if failed.
     """
     try:
-        if not TOGETHER_API_KEY:
-            st.error("Together API key missing.")
-            return None
-        url = "https://api.together.xyz/v1/images/generations"
-        headers = {
-            "Authorization": f"Bearer {TOGETHER_API_KEY}",
-            "Content-Type": "application/json"
-        }
         payload = {
-            "model": "black-forest-labs/FLUX.1-schnell-Free",
             "prompt": prompt,
-            "width": width,
-            "height": height,
-            "steps": 4,
-            "n": 1,
-            "response_format": "b64_json"
+            "image_size": "landscape_16_9",
+            "num_inference_steps": 28,
+            "guidance_scale": 4.0,
+            "num_samples": 1
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("data"):
-                b64_image = result["data"][0].get("b64_json")
-                if b64_image:
-                    return base64.b64decode(b64_image)
-            st.error("No image data received from Together AI.")
+        resp_json = _fal_post("fal-ai/bytedance/seedream/v4/text-to-image", payload)
+        img_bytes = _extract_image_bytes_from_fal(resp_json)
+        if not img_bytes:
+            st.error("No image data received from FAL Seedream v4.")
+            try:
+                st.caption(f"Debug (resp snippet): {json.dumps(resp_json)[:1200]}...")
+            except Exception:
+                pass
             return None
-        else:
-            st.error(f"Together AI API error: {response.status_code} - {response.text}")
-            return None
+        return img_bytes
     except Exception as e:
-        st.error(f"Error calling Together AI API: {e}")
+        st.error(f"Error calling FAL Seedream v4: {e}")
         return None
 
-def generate_image_openai(prompt, size="1536x1024"):
+def edit_image_fal_seedream(image_bytes_list: list[bytes], prompt: str, strength: float = 0.6):
     """
-    Generate image using OpenAI's gpt-image-1 via Images API.
-    Returns image bytes or None if failed.
+    Seedream v4 edit supports multiple images via `image_urls` (up to 4).
+    Pass 1–4 images as bytes; we convert to data URLs and send them in order.
     """
     try:
-        if not OPENAI_API_KEY:
-            st.error("OpenAI API key missing.")
+        if not image_bytes_list:
+            raise ValueError("No images provided for edit.")
+        # Build data URLs (PNG default)
+        def to_data_url(b: bytes, mime: str = "image/png") -> str:
+            return f"data:{mime};base64," + base64.b64encode(b).decode("utf-8")
+
+        urls = [to_data_url(b) for b in image_bytes_list[:4]]
+
+        payload = {
+            "prompt": prompt,
+            "image_urls": urls,                 # REQUIRED; list of up to 4
+            "strength": max(0.0, min(1.0, float(strength))),
+            "num_inference_steps": 28,
+            "guidance_scale": 4.0,
+            "num_samples": 1
+        }
+
+        resp_json = _fal_post("fal-ai/bytedance/seedream/v4/edit", payload)
+        img_bytes = _extract_image_bytes_from_fal(resp_json)
+        if not img_bytes:
+            st.error("FAL edit response did not include an image.")
+            try:
+                st.caption(f"Debug (resp snippet): {json.dumps(resp_json)[:1200]}...")
+            except Exception:
+                pass
             return None
-        client = OpenAI()  # Uses OPENAI_API_KEY from env
-        response = client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            n=1,
-            size=size
-        )
-        if response.data and response.data[0].b64_json:
-            b64_image_data = response.data[0].b64_json
-            return base64.b64decode(b64_image_data)
-        else:
-            st.error("No image data received from OpenAI.")
-            return None
+        return img_bytes
+
     except Exception as e:
-        st.error(f"Failed to generate image with OpenAI: {e}")
+        st.error(f"Error calling FAL Seedream v4 edit: {e}")
         return None
 
+
+
+# --------- Ensure exact 16:9 via Seedream edit (API-compliant) ---------
+
+def ensure_16x9_via_fal_edit(base_image_bytes: bytes, context_prompt: str = "", width: int = 1280, height: int = 720, strength: float = 0.35) -> bytes | None:
+    """
+    Use Seedream v4 edit API to expand the canvas to an exact 16:9 frame by outpainting left/right.
+    Complies with FAL docs by passing `image_size` as an OBJECT: {"width": W, "height": H}.
+    """
+    try:
+        data_url = "data:image/png;base64," + base64.b64encode(base_image_bytes).decode("utf-8")
+        prompt = (
+            "Extend the scene horizontally to fill a 16:9 landscape frame (outpaint left and right). "
+            "Preserve the main subject and proportions; keep style, lighting, and depth of field consistent. "
+            "Do not add on-image text, logos, or watermarks."
+        )
+        if context_prompt:
+            prompt += f" Context: {context_prompt.strip()}"
+        payload = {
+            "prompt": prompt,
+            "image_urls": [data_url],
+            "image_size": {"width": int(width), "height": int(height)},
+            "strength": max(0.0, min(1.0, float(strength))),
+            "num_inference_steps": 24,
+            "guidance_scale": 4.0,
+            "num_samples": 1
+        }
+        resp_json = _fal_post("fal-ai/bytedance/seedream/v4/edit", payload)
+        return _extract_image_bytes_from_fal(resp_json)
+    except Exception as e:
+        st.warning(f"16:9 expansion failed: {e}")
+        return None
+
+
+# ---------- OpenRouter (Gemini 2.5 Flash Image Preview) ----------
 def _extract_openrouter_image_bytes(resp_json):
     """
     Extract image bytes from OpenRouter chat/completions responses for image models.
-    Supports multiple shapes.
+    Supports shapes:
+      1) choices[0].message.images[].image_url.url
+      2) choices[0].message.content: list of parts with image_url / image_base64 / b64_json
+      3) choices[0].message.content: str containing a data URL
     """
     try:
         choices = resp_json.get("choices", [])
@@ -462,17 +610,24 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
     Returns image bytes or None.
     """
     try:
-        if not OPENROUTER_API_KEY:
-            st.error("OpenRouter API key missing.")
-            return None
         url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = _openrouter_headers()
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        if OPENROUTER_SITE_URL:
+            headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+        if OPENROUTER_SITE_NAME:
+            headers["X-Title"] = OPENROUTER_SITE_NAME
 
         messages = [
             {
                 "role": "system",
                 "content": [
-                    {"type": "text", "text": "You are an image generation model. Return exactly one image and no extra text."}
+                    {
+                        "type": "text",
+                        "text": "You are an image generation model. Return exactly one image and no extra text."
+                    }
                 ],
             },
             {
@@ -519,9 +674,7 @@ def generate_image_openrouter(prompt, width=1536, height=1024):
         st.error(f"Error calling OpenRouter API: {e}")
         return None
 
-# ==========================================
-# --- Session state for active/generated image
-# ==========================================
+
 if 'active_image_bytes_io' not in st.session_state:
     st.session_state.active_image_bytes_io = None
 if 'active_image_alt_text' not in st.session_state:
@@ -540,224 +693,380 @@ if 'current_hdr_grading' not in st.session_state:
     st.session_state.current_hdr_grading = False
 if 'last_used_provider' not in st.session_state:
     st.session_state.last_used_provider = None
+if 'use_flux_engineer' not in st.session_state:
+    st.session_state.use_flux_engineer = True
 if 'last_engineered_prompt' not in st.session_state:
     st.session_state.last_engineered_prompt = ""
+
+# --- Add pending_edit_bytes and jump_to_edit state ---
+if 'pending_edit_bytes' not in st.session_state:
+    st.session_state.pending_edit_bytes = None
+if 'jump_to_edit' not in st.session_state:
+    st.session_state.jump_to_edit = False
+
+# --- Add safe margins and prevent cropping state ---
+if 'add_safe_margins' not in st.session_state:
+    st.session_state.add_safe_margins = True
+if 'prevent_cropping' not in st.session_state:
+    st.session_state.prevent_cropping = True
 
 st.title("AI Image Generator & WordPress Uploader")
 
 # --- API key availability checks
-together_available = bool(TOGETHER_API_KEY)
 openai_available = bool(OPENAI_API_KEY)
 openrouter_available = bool(OPENROUTER_API_KEY)
+fal_available = bool(FAL_API_KEY)
 
-if not any([together_available, openai_available, openrouter_available]):
-    st.error("No API keys found. Please set at least one of: TOGETHER_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY in .env")
+if not any([fal_available, openai_available, openrouter_available]):
+    st.error("No API keys found. Please set at least one of: FAL_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY in .env")
 
 # -----------------
-# --- Main UI Form
+# --- Main UI Tabs
 # -----------------
-if together_available or openai_available or openrouter_available:
+if fal_available or openai_available or openrouter_available:
     openai_client = OpenAI() if openai_available else None
 
-    with st.form("ai_image_form"):
-        col_left, col_right = st.columns([3, 2])
+    tab_generate, tab_edit, tab_upload = st.tabs(["Generate", "Edit / Compose", "Upload Your Own"])
 
-        with col_left:
-            prompt_text = st.text_area("Enter your image prompt (Thai or English).", height=140, key="prompt_input")
-            ai_alt_text = st.text_area("Enter alt text for the generated image:", height=120, key="ai_alt_text_input")
+    # =========================
+    # TAB 1: GENERATE (TXT->IMG)
+    # =========================
+    with tab_generate:
+        with st.form("ai_image_form"):
+            col_left, col_right = st.columns([3, 2])
 
-        with col_right:
-            use_flux_engineer = st.checkbox("Use Flux Prompt Engineer (recommended)", value=True, key="use_flux_engineer_checkbox")
-            add_blockchain_bg = st.checkbox("Add futuristic blockchain background", key="blockchain_bg_checkbox")
-            add_hdr_grading = st.checkbox("High dynamic range with vivid and rich color grading", key="hdr_grading_checkbox")
-            add_visually_striking_prefix = st.checkbox("Start with 'A visually striking image of...'", value=True, key="visually_striking_checkbox")
-            bg_option = st.selectbox(
-                "Background / Color Scheme (site presets)",
-                ["None", "CryptoNews (Bitberry)", "ICOBench (Green)", "CryptoDnes (Gold)", "Bitcoinist (Blue)"],
-                index=0,
-                key="background_scheme_select"
-            )
+            with col_left:
+                prompt_text = st.text_area("Enter your image prompt (Thai or English).", height=140, key="prompt_input")
+                ai_alt_text = st.text_area("Enter alt text for the generated image:", height=120, key="ai_alt_text_input")
 
-            # Provider options (include OpenRouter)
-            provider_options = []
-            if together_available:
-                provider_options.append("Flux model (Free)")
-            if openai_available:
-                provider_options.append("OpenAI ($0.30 per image)")
-            if openrouter_available:
-                provider_options.append("Nano Banana ( $0.03 per image)")
-            provider = provider_options[0] if provider_options else None
-
-            if provider_options:
-                provider = st.radio("Choose AI Provider:", provider_options, index=0, key="provider_selection")
-            else:
-                provider = None
-
-            submitted = st.form_submit_button("Generate Image", use_container_width=True)
-
-        if submitted and prompt_text.strip() and ai_alt_text.strip():
-            st.session_state.current_prompt = prompt_text
-            st.session_state.current_alt_text = ai_alt_text
-            st.session_state.current_blockchain_bg = add_blockchain_bg
-            st.session_state.current_hdr_grading = add_hdr_grading
-
-            st.session_state.active_image_bytes_io = None
-            st.session_state.active_image_alt_text = None
-            st.session_state.user_uploaded_raw_bytes = None
-            st.session_state.user_uploaded_alt_text_input = ""
-            st.session_state.last_engineered_prompt = ""
-
-            # 1) Optionally engineer the prompt via LLM role
-            base_prompt = prompt_text.strip()
-            if use_flux_engineer:
-                with st.spinner("Engineering prompt..."):
-                    engineered = enhance_prompt_with_role(base_prompt)
-                    st.session_state.last_engineered_prompt = engineered
-                    final_prompt = engineered
-            else:
-                final_prompt = base_prompt
-
-            # Ensure optional prefix only when user didn't already engineer one with similar lead
-            if add_visually_striking_prefix:
-                lower_pt = final_prompt.strip().lower()
-                if not lower_pt.startswith("a visually striking image of"):
-                    final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
-
-            # 2) Append site-specific background / HDR, with guardrails to avoid tinting subjects
-            if add_blockchain_bg:
-                final_prompt = f"{final_prompt.rstrip('.')}. The background features a futuristic glowing blockchain motif. Apply any color scheme only to the background elements. Keep all main subjects in their natural, realistic, untinted colors with strong contrast so they pop."
-
-            if add_hdr_grading:
-                final_prompt = f"{final_prompt.rstrip('.')}. High dynamic range with vivid and rich color grading."
-
-            if bg_option and bg_option != "None":
-                preset_map = {
-                    "CryptoNews (Bitberry)": "Use a Bitberry-inspired purple colour scheme with modern gradients for the background only; keep all main subjects in natural, realistic, untinted colors that strongly contrast with the background so they pop.",
-                    "ICOBench (Green)": "Background should be a green-to-dark-green gradient applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
-                    "CryptoDnes (Gold)": "Background should be a gold-to-dark gradient applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
-                    "Bitcoinist (Blue)": "Background should use a blue-to-light-blue colour scheme applied only to background elements; keep all main subjects in natural, realistic, untinted colors with strong contrast so they pop.",
-                }
-                chosen_sentence = preset_map.get(bg_option)
-                if chosen_sentence:
-                    text = final_prompt.strip()
-                    # Remove any pre-existing background/color-scheme sentences to avoid duplication
-                    sentence_end = r"(?<=[.!?])\s+"
-                    sentences = re.split(sentence_end, text)
-                    filtered = []
-                    for s in sentences:
-                        s_stripped = s.strip()
-                        if not s_stripped:
-                            continue
-                        if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
-                            continue
-                        if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
-                            continue
-                        if re.search(r"blockchain motif", s_stripped, flags=re.IGNORECASE) and add_blockchain_bg:
-                            # keep the motif sentence; don't drop it
-                            filtered.append(s_stripped)
-                            continue
-                        filtered.append(s_stripped)
-                    cleaned = ". ".join(filtered).strip()
-                    if cleaned and not cleaned.endswith(('.', '!', '?')):
-                        cleaned += "."
-                    final_prompt = f"{cleaned} {chosen_sentence}".strip()
-                    
-            # ✅ Show the exact final prompt being sent to the image API
-            st.subheader("🔍 Final prompt sent to image model")
-            st.code(final_prompt)
-
-
-            # --- Branch by provider
-            image_bytes_from_api = None
-            if provider == "Flux model (Free)" and together_available:
-                st.session_state.last_used_provider = "Together AI"
-                with st.spinner("Generating image with Together AI (Free)..."):
-                    image_bytes_from_api = generate_image_together_ai(final_prompt)
-            elif provider == "OpenAI ($0.30 per image)" and openai_available:
-                st.session_state.last_used_provider = "OpenAI"
-                with st.spinner("Generating image with OpenAI (Premium)..."):
-                    image_bytes_from_api = generate_image_openai(final_prompt, size="1536x1024")
-            elif provider == "Nano Banana ( $0.03 per image)" and openrouter_available:
-                st.session_state.last_used_provider = "OpenRouter"
-                with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
-                    image_bytes_from_api = generate_image_openrouter(final_prompt, width=1536, height=1024)
-            else:
-                st.error("Selected provider is not available. Check your API keys.")
-                image_bytes_from_api = None
-
-            if image_bytes_from_api:
-                # Enforce 16:9 only for OpenRouter outputs
-                force_169 = (st.session_state.last_used_provider == "OpenRouter")
-                final_image_bytes_io = process_image_for_wordpress(
-                    image_bytes_from_api,
-                    force_landscape_16_9=force_169
+            with col_right:
+                use_flux_engineer = st.checkbox("Use prompt engineer (Thai ➜ English via LLM)", value=st.session_state.use_flux_engineer, help="Accept Thai/Eng input; LLM rewrites to polished English prompt for the image model.")
+                st.session_state.use_flux_engineer = use_flux_engineer
+                add_visually_striking_prefix = st.checkbox("Start with 'A visually striking image of...'", value=True, key="visually_striking_checkbox")
+                bg_option = st.selectbox(
+                    "Background / Color Scheme (site presets)",
+                    ["None", "CryptoNews (Bitberry)", "ICOBench (Green)", "CryptoDnes (Gold)", "Bitcoinist (Blue)"],
+                    index=0,
+                    key="background_scheme_select"
                 )
-                if final_image_bytes_io:
-                    st.session_state.active_image_bytes_io = final_image_bytes_io
-                    st.session_state.active_image_alt_text = ai_alt_text
-                    st.success(f"✅ Image generated successfully with {st.session_state.last_used_provider}")
-                    if st.session_state.last_engineered_prompt:
-                        with st.expander("Show engineered prompt"):
-                            st.code(st.session_state.last_engineered_prompt)
-                else:
-                    st.error("Failed to process the generated image.")
-            else:
-                if provider:
-                    st.error(f"Failed to generate image with {provider}.")
+                st.session_state.prevent_cropping = st.checkbox("Prevent cropping (AI expand to 16:9)", value=st.session_state.prevent_cropping, help="Use Seedream edit to extend left/right so the image fits 16:9 without blur padding.")
+                st.session_state.add_safe_margins = st.checkbox("Add 'safe margins' note to prompt", value=st.session_state.add_safe_margins, help="Ask the model to leave headroom/side margins for later crops.")
+                prevent_cropping = st.session_state.prevent_cropping
+                add_safe_margins = st.session_state.add_safe_margins
 
-# -------------------------------
-# --- Section: Upload Your Image
-# -------------------------------
-st.markdown("---_Or Upload Your Own Image_---")
-with st.form("user_image_upload_form"):
-    uploaded_file = st.file_uploader("Choose an image file", type=['png', 'jpg', 'jpeg', 'webp'])
-    user_alt_text = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
-    process_uploaded_button = st.form_submit_button("Process Uploaded Image")
+                # Provider options (FAL default)
+                provider_options = []
+                if fal_available:
+                    provider_options.append("FAL Seedream v4 ($0.03 per image)")
+                if openrouter_available:
+                    provider_options.append("OpenRouter ($0.03 per image)")
+                if openai_available:
+                    provider_options.append("OpenAI ($0.30 per image)")  # moved last
+                provider = st.radio("Choose AI Provider:", provider_options, index=0 if provider_options else 0, key="provider_selection")
 
-    if process_uploaded_button and uploaded_file is not None and user_alt_text.strip():
-        st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
-        st.session_state.user_uploaded_alt_text_input = user_alt_text
+                submitted = st.form_submit_button("Generate Image", use_container_width=True)
 
-        with st.spinner("Processing your uploaded image..."):
-            processed_user_image_io = process_image_for_wordpress(st.session_state.user_uploaded_raw_bytes)
-            if processed_user_image_io:
-                st.session_state.active_image_bytes_io = processed_user_image_io
-                st.session_state.active_image_alt_text = st.session_state.user_uploaded_alt_text_input
-                st.success("Uploaded image processed and ready for WordPress upload.")
-            else:
-                st.error("Failed to process your uploaded image.")
+            if submitted and prompt_text.strip() and ai_alt_text.strip():
+                st.session_state.current_prompt = prompt_text
+                st.session_state.current_alt_text = ai_alt_text
+
                 st.session_state.active_image_bytes_io = None
                 st.session_state.active_image_alt_text = None
-    elif process_uploaded_button and (uploaded_file is None or not user_alt_text.strip()):
-        st.warning("Please upload an image AND provide alt text before processing.")
+                st.session_state.user_uploaded_raw_bytes = None
+                st.session_state.user_uploaded_alt_text_input = ""
+
+                # 1) Optionally engineer the prompt via LLM role (Thai OK)
+                base_prompt = prompt_text.strip()
+                if use_flux_engineer:
+                    with st.spinner("Engineering prompt..."):
+                        engineered = enhance_prompt_with_role(base_prompt)
+                        st.session_state.last_engineered_prompt = engineered
+                        final_prompt = engineered
+                else:
+                    final_prompt = base_prompt
+
+                if add_safe_margins:
+                    final_prompt = f"{final_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
+
+                if add_visually_striking_prefix:
+                    lower_pt = final_prompt.strip().lower()
+                    if not lower_pt.startswith("a visually striking image of"):
+                        final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
+                if bg_option and bg_option != "None":
+                    preset_map = {
+                        "CryptoNews (Bitberry)": "Use a purple colour scheme with modern gradients for the background",
+                        "ICOBench (Green)": "Background should be a green-to-dark-green gradient applied only to background elements",
+                        "CryptoDnes (Gold)": "Background should be a gold-to-dark gradient applied only to background elements",
+                        "Bitcoinist (Blue)": "Background should use a blue-to-light-blue colour scheme applied only to background elements",
+                    }
+                    chosen_sentence = preset_map.get(bg_option)
+                    if chosen_sentence:
+                        text = final_prompt.strip()
+                        sentence_end = r"(?<=[.!?])\s+"
+                        sentences = re.split(sentence_end, text)
+                        filtered = []
+                        for s in sentences:
+                            s_stripped = s.strip()
+                            if not s_stripped:
+                                continue
+                            if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
+                                continue
+                            if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
+                                continue
+                            filtered.append(s_stripped)
+                        cleaned = ". ".join(filtered).strip()
+                        if cleaned and not cleaned.endswith(('.', '!', '?')):
+                            cleaned += "."
+                        final_prompt = f"{cleaned} {chosen_sentence}".strip()
+
+                with st.expander("Show final prompt sent to image model", expanded=False):
+                    st.code(final_prompt, language="markdown")
+
+                # --- Branch by provider
+                image_bytes_from_api = None
+                if provider.startswith("FAL") and fal_available:
+                    st.session_state.last_used_provider = "FAL Seedream v4"
+                    with st.spinner("Generating image with FAL Seedream v4..."):
+                        image_bytes_from_api = generate_image_fal_seedream(final_prompt, width=1536, height=1024)
+                elif provider.startswith("OpenRouter") and openrouter_available:
+                    st.session_state.last_used_provider = "OpenRouter"
+                    with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
+                        image_bytes_from_api = generate_image_openrouter(final_prompt, width=1536, height=1024)
+                elif provider.startswith("OpenAI") and openai_available:
+                    st.session_state.last_used_provider = "OpenAI"
+                    with st.spinner("Generating image with OpenAI (Premium)..."):
+                        try:
+                            client = OpenAI()
+                            response = client.images.generate(
+                                model="gpt-image-1",
+                                prompt=final_prompt,
+                                n=1,
+                                size="1536x1024"
+                            )
+                            if response.data and response.data[0].b64_json:
+                                image_bytes_from_api = base64.b64decode(response.data[0].b64_json)
+                            else:
+                                st.error("No image data received from OpenAI.")
+                        except Exception as e:
+                            st.error(f"Failed to generate image with OpenAI: {e}")
+                else:
+                    st.error("Selected provider is not available. Check your API keys.")
+                    image_bytes_from_api = None
+
+                if image_bytes_from_api:
+                    # If requested, expand to exact 16:9 using Seedream edit (API-compliant image_size object)
+                    if image_bytes_from_api and prevent_cropping and fal_available:
+                        with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
+                            expanded = ensure_16x9_via_fal_edit(image_bytes_from_api, context_prompt=final_prompt, width=1280, height=720, strength=0.35)
+                            if expanded:
+                                image_bytes_from_api = expanded
+                            else:
+                                st.info("16:9 expansion failed; proceeding without it.")
+                    final_image_bytes_io = process_image_for_wordpress(
+                        image_bytes_from_api,
+                        force_landscape_16_9=True,
+                        crop_strategy='crop'
+                    )
+
+                    if final_image_bytes_io:
+                        st.session_state.active_image_bytes_io = final_image_bytes_io
+                        st.session_state.active_image_alt_text = ai_alt_text
+                        st.success(f"✅ Image generated successfully with {st.session_state.last_used_provider}")
+                    else:
+                        st.error("Failed to process the generated image.")
+                else:
+                    if provider:
+                        st.error(f"Failed to generate image with {provider}.")
+
+    # =========================
+    # TAB 2: EDIT / COMPOSE
+    # =========================
+    with tab_edit:
+        st.write("Use Seedream v4's advanced edit/composition. Upload a base image and optional secondary image, then describe the change.")
+        # --- Show preview/notice if an image is staged for editing ---
+        if st.session_state.pending_edit_bytes:
+            st.success("A generated image from the **Generate** tab is ready to edit below.")
+            st.image(BytesIO(st.session_state.pending_edit_bytes), caption="Staged for Edit", use_column_width=True)
+        elif st.session_state.active_image_bytes_io:
+            # If no explicit staging, we can still offer the last active image as a convenience
+            try:
+                st.info("Tip: You can use the currently active image for editing (see checkbox in the form).")
+            except Exception:
+                pass
+        with st.form("fal_edit_form"):
+            use_current_generated = st.checkbox(
+                "Use generated image from **Generate** tab",
+                value=bool(st.session_state.pending_edit_bytes or st.session_state.active_image_bytes_io),
+                help="If checked, the image you generated will be used as the base. Otherwise, upload a file."
+            )
+            st.caption("Provide up to 4 images (1–4). If 'Use generated image' is checked, it counts as the first.")
+            r1c1, r1c2 = st.columns(2)
+            r2c1, r2c2 = st.columns(2)
+            with r1c1:
+                st.markdown("**Image 1**")
+                img1_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img1", label_visibility="collapsed")
+            with r1c2:
+                st.markdown("**Image 2**")
+                img2_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img2", label_visibility="collapsed")
+            with r2c1:
+                st.markdown("**Image 3**")
+                img3_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img3", label_visibility="collapsed")
+            with r2c2:
+                st.markdown("**Image 4**")
+                img4_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img4", label_visibility="collapsed")
+            edit_prompt = st.text_area("Edit/Compose prompt (Thai or English):", height=140, key="fal_edit_prompt")
+            use_engineer_edit = st.checkbox(
+                "Use prompt engineer (Thai ➜ English via LLM)",
+                value=True,
+                help="Accept Thai/Eng input; LLM rewrites to polished English prompt tailored for Seedream edit."
+            )
+            st.session_state.add_safe_margins = st.checkbox("Add 'safe margins' note to prompt", value=st.session_state.add_safe_margins)
+            st.session_state.prevent_cropping = st.checkbox("Prevent cropping (AI expand to 16:9)", value=st.session_state.prevent_cropping)
+            add_safe_margins_edit = st.session_state.add_safe_margins
+            prevent_cropping_edit = st.session_state.prevent_cropping
+            strength = st.slider("Edit strength (lower = subtle, higher = stronger)", min_value=0.0, max_value=1.0, value=0.6, step=0.05)
+            make_16x9 = st.checkbox("Force landscape 16:9 after edit", value=True)
+            alt_text_edit = st.text_input("Alt text for edited image:", value="Edited image")
+            run_edit = st.form_submit_button("Run", use_container_width=True)
+
+            if run_edit:
+                if not fal_available:
+                    st.error("FAL_API_KEY missing. Add it to your .env.")
+                elif not edit_prompt.strip():
+                    st.warning("Please enter an edit/composition prompt.")
+                else:
+                    # Engineer the edit prompt if enabled (Thai OK)
+                    base_edit_prompt = edit_prompt.strip()
+                    if use_engineer_edit:
+                        with st.spinner("Engineering edit prompt..."):
+                            engineered_edit = enhance_prompt_with_role(base_edit_prompt)
+                    else:
+                        engineered_edit = base_edit_prompt
+                    final_edit_prompt = engineered_edit
+                    if add_safe_margins_edit:
+                        final_edit_prompt = f"{final_edit_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
+                    with st.expander("Show final edit prompt sent to Seedream", expanded=True):
+                        st.code(final_edit_prompt, language="markdown")
+
+                    images_list: list[bytes] = []
+                    # Prefer explicitly staged bytes from Generate tab as first image
+                    if use_current_generated and st.session_state.pending_edit_bytes:
+                        images_list.append(st.session_state.pending_edit_bytes)
+                    elif use_current_generated and st.session_state.active_image_bytes_io:
+                        try:
+                            st.session_state.active_image_bytes_io.seek(0)
+                            images_list.append(st.session_state.active_image_bytes_io.getvalue())
+                        except Exception:
+                            pass
+                    # Add uploaded files (in order) until we have at most 4
+                    for f in [img1_file, img2_file, img3_file, img4_file]:
+                        if f and len(images_list) < 4:
+                            images_list.append(f.getvalue())
+
+                    if not images_list:
+                        st.warning("No base image available. Either check the 'Use generated image' option or upload 1–4 images.")
+                    else:
+                        with st.spinner("Running Seedream v4 edit..."):
+                            out_bytes = edit_image_fal_seedream(images_list, final_edit_prompt, strength=strength)
+                        if out_bytes:
+                            # Expand to exact 16:9 using Seedream edit when requested
+                            if out_bytes and prevent_cropping_edit and fal_available:
+                                with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
+                                    expanded = ensure_16x9_via_fal_edit(out_bytes, context_prompt=final_edit_prompt, width=1280, height=720, strength=0.35)
+                                    if expanded:
+                                        out_bytes = expanded
+                                    else:
+                                        st.info("16:9 expansion failed; proceeding without it.")
+                            processed = process_image_for_wordpress(
+                                out_bytes,
+                                force_landscape_16_9=make_16x9,
+                                crop_strategy='crop'
+                            )
+                            if processed:
+                                st.session_state.active_image_bytes_io = processed
+                                st.session_state.active_image_alt_text = alt_text_edit
+                                st.session_state.pending_edit_bytes = None  # clear staging after success
+                                st.success("✅ Edit finished and ready for upload.")
+                            else:
+                                st.error("Failed to process edited image.")
+
+    # =========================
+    # TAB 3: UPLOAD YOUR OWN
+    # =========================
+    with tab_upload:
+        st.markdown("--- _Or Upload Your Own Image_ ---")
+        with st.form("user_image_upload_form"):
+            uploaded_file = st.file_uploader("Choose an image file", type=['png', 'jpg', 'jpeg', 'webp'])
+            user_alt_text = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
+            st.session_state.add_safe_margins = st.checkbox("Add 'safe margins' note to prompt", value=st.session_state.add_safe_margins)
+            st.session_state.prevent_cropping = st.checkbox("Prevent cropping (AI expand to 16:9)", value=st.session_state.prevent_cropping)
+            process_uploaded_button = st.form_submit_button("Process Uploaded Image")
+
+            if process_uploaded_button and uploaded_file is not None and user_alt_text.strip():
+                st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
+                st.session_state.user_uploaded_alt_text_input = user_alt_text
+
+                # Expand to exact 16:9 using Seedream edit when requested
+                raw_bytes = st.session_state.user_uploaded_raw_bytes
+                if raw_bytes and st.session_state.prevent_cropping and fal_available:
+                    with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
+                        expanded = ensure_16x9_via_fal_edit(raw_bytes, context_prompt=st.session_state.user_uploaded_alt_text_input, width=1280, height=720, strength=0.35)
+                        if expanded:
+                            raw_bytes = expanded
+                        else:
+                            st.info("16:9 expansion failed; proceeding without it.")
+                with st.spinner("Processing your uploaded image..."):
+                    processed_user_image_io = process_image_for_wordpress(
+                        raw_bytes,
+                        crop_strategy='crop',
+                        force_landscape_16_9=True
+                    )
+                    if processed_user_image_io:
+                        st.session_state.active_image_bytes_io = processed_user_image_io
+                        st.session_state.active_image_alt_text = st.session_state.user_uploaded_alt_text_input
+                        st.success("Uploaded image processed and ready for WordPress upload.")
+                    else:
+                        st.error("Failed to process your uploaded image.")
+                        st.session_state.active_image_bytes_io = None
+                        st.session_state.active_image_alt_text = None
+            elif process_uploaded_button and (uploaded_file is None or not user_alt_text.strip()):
+                st.warning("Please upload an image AND provide alt text before processing.")
 
 # ------------------------------------------------
 # --- UI: Display active image + Upload to WP
 # ------------------------------------------------
 if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_text:
-    st.markdown("---_Active Image for WordPress Upload_---")
+    st.markdown("--- _Active Image for WordPress Upload_ ---")
 
     st.session_state.active_image_bytes_io.seek(0)
     st.image(st.session_state.active_image_bytes_io, caption=st.session_state.active_image_alt_text[:100] + "...")
+
+    # --- Edit button to stage image for Edit tab ---
+    if st.button("Edit this image in Seedream", key="send_to_edit", use_container_width=True):
+        try:
+            image_data_bytesio_copy = BytesIO(st.session_state.active_image_bytes_io.getvalue())
+        except Exception:
+            st.session_state.active_image_bytes_io.seek(0)
+            image_data_bytesio_copy = BytesIO(st.session_state.active_image_bytes_io.read())
+        image_data_bytesio_copy.seek(0)
+        st.session_state.pending_edit_bytes = image_data_bytesio_copy.getvalue()
+        st.session_state.jump_to_edit = True
+        st.success("Sent to **Edit / Compose** tab. Click that tab to continue.")
 
     current_alt_text = st.session_state.active_image_alt_text
     image_data_bytesio = st.session_state.active_image_bytes_io
     image_data_bytesio.seek(0)
 
-    def generate_english_filename(alt_text):
-        """Generate English filename from alt text, focusing on crypto/blockchain terms"""
-        english_words = re.findall(r'[a-zA-Z]+', alt_text.lower())
-        relevant_words = []
-        for word in english_words:
-            if len(word) > 2:
-                relevant_words.append(word)
-            if len(relevant_words) >= 3:
-                break
-        filename_base = '_'.join(relevant_words[:3]) if relevant_words else f"crypto_image_{int(time.time())}"
-        return f"{filename_base}_processed.jpg"
+    def prepare_alt_and_filename(alt_text: str):
+        # append date to alt text (SEO)
+        date_str = time.strftime("%d-%m-%Y")
+        alt_with_date = f"{alt_text.strip()} {date_str}".strip()
+        # create SEO filename with date + short hash
+        filename = generate_seo_image_name(alt_with_date, ext="jpg")
+        return alt_with_date, filename
 
-    upload_filename = generate_english_filename(current_alt_text)
-    alt_text_for_upload = current_alt_text[:100]
+    alt_text_for_upload, upload_filename = prepare_alt_and_filename(current_alt_text)
+    alt_text_for_upload = alt_text_for_upload[:100]
 
     row1_col1, row1_col2 = st.columns(2)
     row2_col1, row2_col2 = st.columns(2)
