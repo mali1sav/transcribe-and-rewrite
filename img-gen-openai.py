@@ -661,6 +661,11 @@ if together_available or openai_available or openrouter_available:
                     if cleaned and not cleaned.endswith(('.', '!', '?')):
                         cleaned += "."
                     final_prompt = f"{cleaned} {chosen_sentence}".strip()
+                    
+            # ✅ Show the exact final prompt being sent to the image API
+            st.subheader("🔍 Final prompt sent to image model")
+            st.code(final_prompt)
+
 
             # --- Branch by provider
             image_bytes_from_api = None
