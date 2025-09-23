@@ -1088,20 +1088,12 @@ if fal_available or openai_available or openrouter_available:
                 st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
                 st.session_state.user_uploaded_alt_text_input = user_alt_text
 
-                # Expand to exact 16:9 using Seedream edit when requested
                 raw_bytes = st.session_state.user_uploaded_raw_bytes
-                if raw_bytes and st.session_state.prevent_cropping and fal_available:
-                    with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
-                        expanded = ensure_16x9_via_fal_edit(raw_bytes, context_prompt=st.session_state.user_uploaded_alt_text_input, width=1280, height=720, strength=0.35)
-                        if expanded:
-                            raw_bytes = expanded
-                        else:
-                            st.info("16:9 expansion failed; proceeding without it.")
                 with st.spinner("Processing your uploaded image..."):
                     processed_user_image_io = process_image_for_wordpress(
                         raw_bytes,
                         crop_strategy='crop',
-                        force_landscape_16_9=True
+                        force_landscape_16_9=False
                     )
                     if processed_user_image_io:
                         st.session_state.active_image_bytes_io = processed_user_image_io
