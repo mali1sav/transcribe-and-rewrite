@@ -258,6 +258,81 @@ def _openrouter_headers():
         headers["X-Title"] = OPENROUTER_SITE_NAME
     return headers
 
+# ---------- SEO helpers via LLM (Thai alt/title + English filename) ----------
+def _llm_chat_json(messages, prefer_openai=True, timeout=60) -> dict | None:
+    """
+    Call OpenAI (preferred) or OpenRouter for a small JSON response.
+    Returns parsed JSON dict or None.
+    """
+    try:
+        if prefer_openai and OPENAI_API_KEY:
+            client = OpenAI()
+            resp = client.chat.completions.create(
+                model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
+                temperature=0.2,
+                messages=messages,
+                response_format={"type": "json_object"},
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            return json.loads(content) if content else None
+        elif OPENROUTER_API_KEY:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            payload = {
+                "model": os.getenv("OPENROUTER_TEXT_MODEL", "openai/gpt-4o-mini"),
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+                "messages": messages,
+            }
+            resp = requests.post(url, headers=_openrouter_headers(), data=json.dumps(payload), timeout=timeout)
+            if resp.status_code == 200:
+                j = resp.json()
+                content = (j.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+                return json.loads(content) if content else None
+            else:
+                st.warning(f"OpenRouter text LLM error: {resp.status_code} - {resp.text[:300]}")
+    except Exception as e:
+        st.warning(f"LLM JSON call failed: {e}")
+    return None
+
+def generate_seo_meta_from_prompt(prompt_text: str) -> tuple[str, str]:
+    """
+    From the user's prompt, create:
+      - Thai SEO sentence (alt/title)  ➜ we append dd-mm-yyyy
+      - English SEO filename slug      ➜ we append dd-mm-yyyy + short hash + .jpg
+    Returns (alt_title_th_with_date, filename_with_date_ext)
+    """
+    date_str = time.strftime("%d-%m-%Y")
+    # Ask the LLM for Thai sentence + English slug in strict JSON
+    sys = (
+        "You are an SEO assistant. Produce a short, human-friendly ALT/TITLE in Thai, "
+        "and a concise lowercase English filename slug for an image. "
+        "Return strict JSON with keys: thai_sentence, english_slug. "
+        "Rules: thai_sentence 6-16 words, no site names, no hashtags; "
+        "english_slug 3-6 words, kebab-case, ASCII only, no dates or extension."
+    )
+    user = f"Image prompt/context:\n{prompt_text.strip()}\nReturn JSON only."
+    out = _llm_chat_json(
+        messages=[{"role": "system", "content": sys}, {"role": "user", "content": user}],
+        prefer_openai=True,
+        timeout=60,
+    )
+    thai_sentence = None
+    english_slug = None
+    if isinstance(out, dict):
+        thai_sentence = (out.get("thai_sentence") or "").strip()
+        english_slug = (out.get("english_slug") or "").strip()
+    # Fallbacks
+    if not thai_sentence:
+        thai_sentence = f"ภาพประกอบข่าว: {prompt_text.strip()[:60]}"
+    if not english_slug:
+        english_slug = _slugify_english(prompt_text)[:40] or "image"
+    # Compose outputs with date
+    alt_title_with_date = f"{thai_sentence} {date_str}".strip()
+    slug = _slugify_english(english_slug)
+    short_hash = hashlib.md5(slug.encode('utf-8')).hexdigest()[:6]
+    filename = f"{slug}-{date_str}-{short_hash}.jpg"
+    return alt_title_with_date, filename
+
 # ---------- String helpers ----------
 def _slugify_english(text: str) -> str:
     # keep ascii letters/numbers/spaces, turn spaces to hyphens, collapse repeats
@@ -303,6 +378,13 @@ def generate_seo_image_name(alt_text: str, ext: str = "jpg") -> str:
     slug = seo_filename_from_alt_via_openrouter(alt_text) or _slugify_english(alt_text)
     date_str = time.strftime("%d-%m-%Y")
     short_hash = hashlib.md5(alt_text.encode("utf-8")).hexdigest()[:6]
+    return f"{slug}-{date_str}-{short_hash}.{ext}"
+
+# Utility: generate filename from slug directly
+def generate_filename_from_slug(slug: str, ext: str = "jpg") -> str:
+    slug = _slugify_english(slug)
+    date_str = time.strftime("%d-%m-%Y")
+    short_hash = hashlib.md5(slug.encode("utf-8")).hexdigest()[:6]
     return f"{slug}-{date_str}-{short_hash}.{ext}"
 
 # ---------- Thai-aware prompt engineering system prompt ----------
@@ -1057,15 +1139,19 @@ if st.session_state.active_image_bytes_io and st.session_state.active_image_alt_
     image_data_bytesio = st.session_state.active_image_bytes_io
     image_data_bytesio.seek(0)
 
-    def prepare_alt_and_filename(alt_text: str):
-        # append date to alt text (SEO)
-        date_str = time.strftime("%d-%m-%Y")
-        alt_with_date = f"{alt_text.strip()} {date_str}".strip()
-        # create SEO filename with date + short hash
-        filename = generate_seo_image_name(alt_with_date, ext="jpg")
-        return alt_with_date, filename
 
-    alt_text_for_upload, upload_filename = prepare_alt_and_filename(current_alt_text)
+    # Build SEO meta from the best available context (engineered prompt preferred)
+    def pick_best_prompt_context() -> str:
+        if st.session_state.get("last_engineered_prompt"):
+            return st.session_state.last_engineered_prompt
+        if st.session_state.get("current_prompt"):
+            return st.session_state.current_prompt
+        if st.session_state.get("user_uploaded_alt_text_input"):
+            return st.session_state.user_uploaded_alt_text_input
+        return st.session_state.active_image_alt_text or ""
+
+    context_for_seo = pick_best_prompt_context()
+    alt_text_for_upload, upload_filename = generate_seo_meta_from_prompt(context_for_seo)
     alt_text_for_upload = alt_text_for_upload[:100]
 
     row1_col1, row1_col2 = st.columns(2)
