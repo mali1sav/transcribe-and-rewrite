@@ -519,16 +519,40 @@ def _extract_image_bytes_from_fal(resp_json: dict):
 
     return None
 
-def generate_image_fal_seedream(prompt, width=1536, height=1024):
+def _get_image_size(image_bytes: bytes) -> tuple[int, int] | None:
+    """Return (width, height) for given image bytes or None on failure."""
+    try:
+        with Image.open(BytesIO(image_bytes)) as img:
+            return img.width, img.height
+    except Exception:
+        return None
+
+
+def _is_near_aspect_ratio(image_bytes: bytes, target_ratio: float = 16/9, tolerance: float = 0.03) -> bool:
+    """
+    Check whether the provided image bytes are already close to the target aspect ratio.
+    tolerance is the relative difference allowed (e.g. 0.03 == ±3%).
+    """
+    size = _get_image_size(image_bytes)
+    if not size:
+        return False
+    width, height = size
+    if width <= 0 or height <= 0:
+        return False
+    ratio = width / float(height)
+    return abs(ratio - target_ratio) <= target_ratio * tolerance
+
+
+def generate_image_fal_seedream(prompt, width=1536, height=864):
     """
     Generate image using FAL Seedream v4 text-to-image.
-    Note: FAL Seedream expects `image_size` as one of the presets: 'square_hd', 'square', 'portrait_4_3', 'portrait_16_9', 'landscape_4_3', 'landscape_16_9'. We use 'landscape_16_9' for site thumbnails.
+    We request a precise 16:9 frame using the documented object form for `image_size`.
     Returns image bytes or None if failed.
     """
     try:
         payload = {
             "prompt": prompt,
-            "image_size": "landscape_16_9",
+            "image_size": {"width": int(width), "height": int(height)},
             "num_inference_steps": 28,
             "guidance_scale": 4.0,
             "num_samples": 1
@@ -779,6 +803,42 @@ if 'use_flux_engineer' not in st.session_state:
     st.session_state.use_flux_engineer = True
 if 'last_engineered_prompt' not in st.session_state:
     st.session_state.last_engineered_prompt = ""
+if 'editable_prompt' not in st.session_state:
+    st.session_state.editable_prompt = ""
+if 'prompt_edited' not in st.session_state:
+    st.session_state.prompt_edited = False
+if 'original_prompt_for_reset' not in st.session_state:
+    st.session_state.original_prompt_for_reset = ""
+if 'prompt_ready' not in st.session_state:
+    st.session_state.prompt_ready = False
+if 'editable_edit_prompt' not in st.session_state:
+    st.session_state.editable_edit_prompt = ""
+if 'edit_prompt_edited' not in st.session_state:
+    st.session_state.edit_prompt_edited = False
+if 'last_engineered_edit_prompt' not in st.session_state:
+    st.session_state.last_engineered_edit_prompt = ""
+if 'edit_original_prompt_for_reset' not in st.session_state:
+    st.session_state.edit_original_prompt_for_reset = ""
+if 'edit_prompt_ready' not in st.session_state:
+    st.session_state.edit_prompt_ready = False
+if 'edit_images_bytes' not in st.session_state:
+    st.session_state.edit_images_bytes = []
+if 'edit_strength' not in st.session_state:
+    st.session_state.edit_strength = 0.6
+if 'edit_force_169' not in st.session_state:
+    st.session_state.edit_force_169 = True
+if 'edit_alt_text_value' not in st.session_state:
+    st.session_state.edit_alt_text_value = "Edited image"
+if 'edit_prevent_cropping' not in st.session_state:
+    st.session_state.edit_prevent_cropping = True
+if 'edit_add_safe_margins' not in st.session_state:
+    st.session_state.edit_add_safe_margins = False
+if 'edit_use_prompt_engineer' not in st.session_state:
+    st.session_state.edit_use_prompt_engineer = False
+if 'edit_use_generated_image' not in st.session_state:
+    st.session_state.edit_use_generated_image = False
+if 'edit_raw_prompt' not in st.session_state:
+    st.session_state.edit_raw_prompt = ""
 
 # --- Add pending_edit_bytes and jump_to_edit state ---
 if 'pending_edit_bytes' not in st.session_state:
@@ -788,7 +848,7 @@ if 'jump_to_edit' not in st.session_state:
 
 # --- Add safe margins and prevent cropping state ---
 if 'add_safe_margins' not in st.session_state:
-    st.session_state.add_safe_margins = True
+    st.session_state.add_safe_margins = False
 if 'prevent_cropping' not in st.session_state:
     st.session_state.prevent_cropping = True
 
@@ -814,6 +874,14 @@ if fal_available or openai_available or openrouter_available:
     # TAB 1: GENERATE (TXT->IMG)
     # =========================
     with tab_generate:
+        provider_options: list[str] = []
+        if fal_available:
+            provider_options.append("FAL Seedream v4 ($0.03 per image)")
+        if openrouter_available:
+            provider_options.append("OpenRouter ($0.03 per image)")
+        if openai_available:
+            provider_options.append("OpenAI ($0.30 per image)")  # moved last
+
         with st.form("ai_image_form"):
             col_left, col_right = st.columns([3, 2])
 
@@ -836,241 +904,390 @@ if fal_available or openai_available or openrouter_available:
                 prevent_cropping = st.session_state.prevent_cropping
                 add_safe_margins = st.session_state.add_safe_margins
 
-                # Provider options (FAL default)
-                provider_options = []
-                if fal_available:
-                    provider_options.append("FAL Seedream v4 ($0.03 per image)")
-                if openrouter_available:
-                    provider_options.append("OpenRouter ($0.03 per image)")
-                if openai_available:
-                    provider_options.append("OpenAI ($0.30 per image)")  # moved last
-                provider = st.radio("Choose AI Provider:", provider_options, index=0 if provider_options else 0, key="provider_selection")
+                prepare_prompt = st.form_submit_button("Prepare Prompt", use_container_width=True)
 
-                submitted = st.form_submit_button("Generate Image", use_container_width=True)
+            if prepare_prompt:
+                if not prompt_text.strip() or not ai_alt_text.strip():
+                    st.warning("Please enter both a prompt and alt text before preparing.")
+                else:
+                    st.session_state.current_prompt = prompt_text
+                    st.session_state.current_alt_text = ai_alt_text
 
-            if submitted and prompt_text.strip() and ai_alt_text.strip():
-                st.session_state.current_prompt = prompt_text
-                st.session_state.current_alt_text = ai_alt_text
+                    # Reset previously generated assets
+                    st.session_state.active_image_bytes_io = None
+                    st.session_state.active_image_alt_text = None
+                    st.session_state.user_uploaded_raw_bytes = None
+                    st.session_state.user_uploaded_alt_text_input = ""
 
-                st.session_state.active_image_bytes_io = None
-                st.session_state.active_image_alt_text = None
-                st.session_state.user_uploaded_raw_bytes = None
-                st.session_state.user_uploaded_alt_text_input = ""
-
-                # 1) Optionally engineer the prompt via LLM role (Thai OK)
-                base_prompt = prompt_text.strip()
-                if use_flux_engineer:
-                    with st.spinner("Engineering prompt..."):
-                        engineered = enhance_prompt_with_role(base_prompt)
+                    # 1) Optionally engineer the prompt via LLM role (Thai OK)
+                    base_prompt = prompt_text.strip()
+                    engineered = base_prompt
+                    if use_flux_engineer:
+                        with st.spinner("Engineering prompt..."):
+                            engineered = enhance_prompt_with_role(base_prompt)
                         st.session_state.last_engineered_prompt = engineered
-                        final_prompt = engineered
-                else:
-                    final_prompt = base_prompt
-
-                if add_safe_margins:
-                    final_prompt = f"{final_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
-
-                if add_visually_striking_prefix:
-                    lower_pt = final_prompt.strip().lower()
-                    if not lower_pt.startswith("a visually striking image of"):
-                        final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
-                if bg_option and bg_option != "None":
-                    preset_map = {
-                        "CryptoNews (Bitberry)": "Use a purple colour scheme with modern gradients for the background",
-                        "ICOBench (Green)": "Background should be a green-to-dark-green gradient applied only to background elements",
-                        "CryptoDnes (Gold)": "Background should be a gold-to-dark gradient applied only to background elements",
-                        "Bitcoinist (Blue)": "Background should use a blue-to-light-blue colour scheme applied only to background elements",
-                    }
-                    chosen_sentence = preset_map.get(bg_option)
-                    if chosen_sentence:
-                        text = final_prompt.strip()
-                        sentence_end = r"(?<=[.!?])\s+"
-                        sentences = re.split(sentence_end, text)
-                        filtered = []
-                        for s in sentences:
-                            s_stripped = s.strip()
-                            if not s_stripped:
-                                continue
-                            if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
-                                continue
-                            if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
-                                continue
-                            filtered.append(s_stripped)
-                        cleaned = ". ".join(filtered).strip()
-                        if cleaned and not cleaned.endswith(('.', '!', '?')):
-                            cleaned += "."
-                        final_prompt = f"{cleaned} {chosen_sentence}".strip()
-
-                with st.expander("Show final prompt sent to image model", expanded=False):
-                    st.code(final_prompt, language="markdown")
-
-                # --- Branch by provider
-                image_bytes_from_api = None
-                if provider.startswith("FAL") and fal_available:
-                    st.session_state.last_used_provider = "FAL Seedream v4"
-                    with st.spinner("Generating image with FAL Seedream v4..."):
-                        image_bytes_from_api = generate_image_fal_seedream(final_prompt, width=1536, height=1024)
-                elif provider.startswith("OpenRouter") and openrouter_available:
-                    st.session_state.last_used_provider = "OpenRouter"
-                    with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
-                        image_bytes_from_api = generate_image_openrouter(final_prompt, width=1536, height=1024)
-                elif provider.startswith("OpenAI") and openai_available:
-                    st.session_state.last_used_provider = "OpenAI"
-                    with st.spinner("Generating image with OpenAI (Premium)..."):
-                        try:
-                            client = OpenAI()
-                            response = client.images.generate(
-                                model="gpt-image-1",
-                                prompt=final_prompt,
-                                n=1,
-                                size="1536x1024"
-                            )
-                            if response.data and response.data[0].b64_json:
-                                image_bytes_from_api = base64.b64decode(response.data[0].b64_json)
-                            else:
-                                st.error("No image data received from OpenAI.")
-                        except Exception as e:
-                            st.error(f"Failed to generate image with OpenAI: {e}")
-                else:
-                    st.error("Selected provider is not available. Check your API keys.")
-                    image_bytes_from_api = None
-
-                if image_bytes_from_api:
-                    # If requested, expand to exact 16:9 using Seedream edit (API-compliant image_size object)
-                    if image_bytes_from_api and prevent_cropping and fal_available:
-                        with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
-                            expanded = ensure_16x9_via_fal_edit(image_bytes_from_api, context_prompt=final_prompt, width=1280, height=720, strength=0.35)
-                            if expanded:
-                                image_bytes_from_api = expanded
-                            else:
-                                st.info("16:9 expansion failed; proceeding without it.")
-                    final_image_bytes_io = process_image_for_wordpress(
-                        image_bytes_from_api,
-                        force_landscape_16_9=True,
-                        crop_strategy='crop'
-                    )
-
-                    if final_image_bytes_io:
-                        st.session_state.active_image_bytes_io = final_image_bytes_io
-                        st.session_state.active_image_alt_text = ai_alt_text
-                        st.success(f"✅ Image generated successfully with {st.session_state.last_used_provider}")
                     else:
-                        st.error("Failed to process the generated image.")
+                        st.session_state.last_engineered_prompt = base_prompt
+
+                    final_prompt = engineered
+
+                    if add_safe_margins:
+                        final_prompt = f"{final_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
+
+                    if add_visually_striking_prefix:
+                        lower_pt = final_prompt.strip().lower()
+                        if not lower_pt.startswith("a visually striking image of"):
+                            final_prompt = f"A visually striking image of {final_prompt.lstrip()}"
+                    if bg_option and bg_option != "None":
+                        preset_map = {
+                            "CryptoNews (Bitberry)": "Use a purple colour scheme with modern gradients for the background",
+                            "ICOBench (Green)": "Background should be a green-to-dark-green gradient applied only to background elements",
+                            "CryptoDnes (Gold)": "Background should be a gold-to-dark gradient applied only to background elements",
+                            "Bitcoinist (Blue)": "Background should use a blue-to-light-blue colour scheme applied only to background elements",
+                        }
+                        chosen_sentence = preset_map.get(bg_option)
+                        if chosen_sentence:
+                            text = final_prompt.strip()
+                            sentence_end = r"(?<=[.!?])\s+"
+                            sentences = re.split(sentence_end, text)
+                            filtered = []
+                            for s in sentences:
+                                s_stripped = s.strip()
+                                if not s_stripped:
+                                    continue
+                                if re.search(r"^background ", s_stripped, flags=re.IGNORECASE):
+                                    continue
+                                if re.search(r"colou?r scheme", s_stripped, flags=re.IGNORECASE):
+                                    continue
+                                filtered.append(s_stripped)
+                            cleaned = ". ".join(filtered).strip()
+                            if cleaned and not cleaned.endswith(('.', '!', '?')):
+                                cleaned += "."
+                            final_prompt = f"{cleaned} {chosen_sentence}".strip()
+
+                    st.session_state.editable_prompt = final_prompt
+                    st.session_state.original_prompt_for_reset = final_prompt
+                    st.session_state.prompt_edited = False
+                    # Default provider selection after preparation
+                    if provider_options:
+                        default_provider = st.session_state.get("selected_provider_value", provider_options[0])
+                        if default_provider not in provider_options:
+                            default_provider = provider_options[0]
+                        st.session_state.selected_provider_value = default_provider
+                    else:
+                        st.session_state.selected_provider_value = ""
+                    st.session_state.prepared_prevent_cropping = prevent_cropping
+                    st.session_state.prompt_ready = True
+
+                    st.success("Prompt prepared. Review and edit below before generating the image.")
+
+        if st.session_state.get("prompt_ready"):
+            selected_provider_default = st.session_state.get("selected_provider_value", provider_options[0] if provider_options else "")
+            if provider_options:
+                selected_index = provider_options.index(selected_provider_default) if selected_provider_default in provider_options else 0
+                selected_provider = st.radio(
+                    "Choose AI Provider:",
+                    provider_options,
+                    index=selected_index,
+                    key="provider_selection_ready"
+                )
+            else:
+                selected_provider = ""
+
+            st.session_state.selected_provider_value = selected_provider
+
+            st.subheader("✏️ Edit Enhanced Prompt (Optional)")
+            st.caption("Modify the enhanced English prompt below. The final version shown will be sent to the image model when you generate.")
+
+            edited_prompt = st.text_area(
+                "Enhanced Prompt (editable):",
+                value=st.session_state.editable_prompt,
+                height=160,
+                key="editable_prompt_editor"
+            )
+
+            if edited_prompt != st.session_state.editable_prompt:
+                st.session_state.editable_prompt = edited_prompt
+                st.session_state.prompt_edited = edited_prompt.strip() != st.session_state.original_prompt_for_reset.strip()
+
+            col_actions = st.columns([1, 1, 1]) if provider_options else [st.container(), st.container(), st.container()]
+
+            with col_actions[0]:
+                reset_clicked = st.button("🔄 Reset Prompt", key="reset_prompt_outside", use_container_width=True)
+            with col_actions[1]:
+                st.empty()
+            with col_actions[2]:
+                generate_clicked = st.button("🚀 Generate Image", key="generate_image_button", use_container_width=True, type="primary")
+
+            if reset_clicked:
+                st.session_state.editable_prompt = st.session_state.original_prompt_for_reset
+                st.session_state.prompt_edited = False
+                st.experimental_rerun()
+
+            if generate_clicked:
+                final_prompt = (st.session_state.editable_prompt or "").strip()
+                if not final_prompt:
+                    st.error("Final prompt is empty. Please revise it before generating.")
                 else:
-                    if provider:
-                        st.error(f"Failed to generate image with {provider}.")
+                    if not st.session_state.current_alt_text:
+                        st.error("Alt text is missing. Please prepare the prompt again with alt text.")
+                    else:
+                        image_bytes_from_api = None
+                        provider_choice = selected_provider or ""
+
+                        if provider_choice.startswith("FAL") and fal_available:
+                            st.session_state.last_used_provider = "FAL Seedream v4"
+                            with st.spinner("Generating image with FAL Seedream v4..."):
+                                image_bytes_from_api = generate_image_fal_seedream(final_prompt, width=1536, height=1024)
+                        elif provider_choice.startswith("OpenRouter") and openrouter_available:
+                            st.session_state.last_used_provider = "OpenRouter"
+                            with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
+                                image_bytes_from_api = generate_image_openrouter(final_prompt, width=1536, height=1024)
+                        elif provider_choice.startswith("OpenAI") and openai_available:
+                            st.session_state.last_used_provider = "OpenAI"
+                            with st.spinner("Generating image with OpenAI (Premium)..."):
+                                try:
+                                    client = OpenAI()
+                                    response = client.images.generate(
+                                        model="gpt-image-1",
+                                        prompt=final_prompt,
+                                        n=1,
+                                        size="1536x1024"
+                                    )
+                                    if response.data and response.data[0].b64_json:
+                                        image_bytes_from_api = base64.b64decode(response.data[0].b64_json)
+                                    else:
+                                        st.error("No image data received from OpenAI.")
+                                except Exception as e:
+                                    st.error(f"Failed to generate image with OpenAI: {e}")
+                        else:
+                            if provider_options:
+                                st.error("Selected provider is not available. Check your API keys or choose another provider.")
+                            image_bytes_from_api = None
+
+                        if image_bytes_from_api:
+                            prevent_cropping_flag = st.session_state.get("prepared_prevent_cropping", False)
+                            needs_outpaint = not _is_near_aspect_ratio(image_bytes_from_api) and prevent_cropping_flag and fal_available
+                            if needs_outpaint:
+                                with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
+                                    expanded = ensure_16x9_via_fal_edit(image_bytes_from_api, context_prompt=final_prompt, width=1280, height=720, strength=0.35)
+                                    if expanded:
+                                        image_bytes_from_api = expanded
+                                    else:
+                                        st.info("16:9 expansion failed; proceeding without it.")
+                            final_image_bytes_io = process_image_for_wordpress(
+                                image_bytes_from_api,
+                                force_landscape_16_9=True,
+                                crop_strategy='crop'
+                            )
+
+                            if final_image_bytes_io:
+                                st.session_state.active_image_bytes_io = final_image_bytes_io
+                                st.session_state.active_image_alt_text = st.session_state.current_alt_text
+                                st.session_state.prompt_ready = False
+                                st.success(f"✅ Image generated successfully with {st.session_state.last_used_provider}")
+                            else:
+                                st.error("Failed to process the generated image.")
+                        else:
+                            if provider_choice:
+                                st.error(f"Failed to generate image with {provider_choice}.")
 
     # =========================
     # TAB 2: EDIT / COMPOSE
     # =========================
     with tab_edit:
         st.write("Use Seedream v4's advanced edit/composition. Upload a base image and optional secondary image, then describe the change.")
-        # --- Show preview/notice if an image is staged for editing ---
+
         if st.session_state.pending_edit_bytes:
-            st.success("A generated image from the **Generate** tab is ready to edit below.")
-            st.image(BytesIO(st.session_state.pending_edit_bytes), caption="Staged for Edit", use_column_width=True)
+            st.success("A generated image from the **Generate** tab is staged for editing.")
         elif st.session_state.active_image_bytes_io:
-            # If no explicit staging, we can still offer the last active image as a convenience
-            try:
-                st.info("Tip: You can use the currently active image for editing (see checkbox in the form).")
-            except Exception:
-                pass
+            st.info("Tip: enable **Use generated image** to start from your most recent output.")
+
         with st.form("fal_edit_form"):
             use_current_generated = st.checkbox(
                 "Use generated image from **Generate** tab",
-                value=bool(st.session_state.pending_edit_bytes or st.session_state.active_image_bytes_io),
-                help="If checked, the image you generated will be used as the base. Otherwise, upload a file."
+                value=st.session_state.edit_use_generated_image,
+                help="If checked, the last generated image becomes the first base image."
             )
-            st.caption("Provide up to 4 images (1–4). If 'Use generated image' is checked, it counts as the first.")
+            st.caption("Provide up to 4 images (1–4). If 'Use generated image' is checked, it counts as the first input.")
+
             r1c1, r1c2 = st.columns(2)
-            r2c1, r2c2 = st.columns(2)
             with r1c1:
                 st.markdown("**Image 1**")
                 img1_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img1", label_visibility="collapsed")
             with r1c2:
                 st.markdown("**Image 2**")
                 img2_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img2", label_visibility="collapsed")
+
+            r2c1, r2c2 = st.columns(2)
             with r2c1:
                 st.markdown("**Image 3**")
                 img3_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img3", label_visibility="collapsed")
             with r2c2:
                 st.markdown("**Image 4**")
                 img4_file = st.file_uploader("", type=['png', 'jpg', 'jpeg', 'webp'], key="fal_img4", label_visibility="collapsed")
-            edit_prompt = st.text_area("Edit/Compose prompt (Thai or English):", height=140, key="fal_edit_prompt")
+
+            edit_prompt_input = st.text_area(
+                "Edit/Compose prompt (Thai or English):",
+                height=140,
+                value=st.session_state.edit_raw_prompt
+            )
+
             use_engineer_edit = st.checkbox(
                 "Use prompt engineer (Thai ➜ English via LLM)",
-                value=True,
-                help="Accept Thai/Eng input; LLM rewrites to polished English prompt tailored for Seedream edit."
+                value=st.session_state.edit_use_prompt_engineer,
+                help="Leave off to preserve your exact instructions. Enable if you need translation/expansion."
             )
-            st.session_state.add_safe_margins = st.checkbox("Add 'safe margins' note to prompt", value=st.session_state.add_safe_margins)
-            st.session_state.prevent_cropping = st.checkbox("Prevent cropping (AI expand to 16:9)", value=st.session_state.prevent_cropping)
-            add_safe_margins_edit = st.session_state.add_safe_margins
-            prevent_cropping_edit = st.session_state.prevent_cropping
-            strength = st.slider("Edit strength (lower = subtle, higher = stronger)", min_value=0.0, max_value=1.0, value=0.6, step=0.05)
-            make_16x9 = st.checkbox("Force landscape 16:9 after edit", value=True)
-            alt_text_edit = st.text_input("Alt text for edited image:", value="Edited image")
-            run_edit = st.form_submit_button("Run", use_container_width=True)
 
-            if run_edit:
-                if not fal_available:
-                    st.error("FAL_API_KEY missing. Add it to your .env.")
-                elif not edit_prompt.strip():
-                    st.warning("Please enter an edit/composition prompt.")
+            prepare_edit = st.form_submit_button("Prepare Edit", use_container_width=True)
+
+        if prepare_edit:
+            if not fal_available:
+                st.error("FAL_API_KEY missing. Add it to your .env.")
+            elif not edit_prompt_input.strip():
+                st.warning("Please enter an edit/composition prompt.")
+            else:
+                images_list: list[bytes] = []
+                if use_current_generated and st.session_state.pending_edit_bytes:
+                    images_list.append(st.session_state.pending_edit_bytes)
+                elif use_current_generated and st.session_state.active_image_bytes_io:
+                    try:
+                        st.session_state.active_image_bytes_io.seek(0)
+                        images_list.append(st.session_state.active_image_bytes_io.getvalue())
+                    except Exception:
+                        pass
+                for f in [img1_file, img2_file, img3_file, img4_file]:
+                    if f and len(images_list) < 4:
+                        images_list.append(f.getvalue())
+
+                if not images_list:
+                    st.warning("No base image available. Either enable 'Use generated image' or upload 1–4 files.")
                 else:
-                    # Engineer the edit prompt if enabled (Thai OK)
-                    base_edit_prompt = edit_prompt.strip()
+                    base_edit_prompt = edit_prompt_input.strip()
+                    engineered_edit = base_edit_prompt
                     if use_engineer_edit:
                         with st.spinner("Engineering edit prompt..."):
                             engineered_edit = enhance_prompt_with_role(base_edit_prompt)
+                        st.session_state.last_engineered_edit_prompt = engineered_edit
                     else:
-                        engineered_edit = base_edit_prompt
-                    final_edit_prompt = engineered_edit
-                    if add_safe_margins_edit:
+                        st.session_state.last_engineered_edit_prompt = ""
+
+                    st.session_state.edit_use_generated_image = use_current_generated
+                    st.session_state.edit_use_prompt_engineer = use_engineer_edit
+                    st.session_state.edit_images_bytes = images_list
+                    st.session_state.edit_raw_prompt = base_edit_prompt
+                    st.session_state.editable_edit_prompt = engineered_edit
+                    st.session_state.edit_original_prompt_for_reset = engineered_edit
+                    st.session_state.edit_prompt_editor_ready = engineered_edit
+                    st.session_state.edit_prompt_edited = False
+                    st.session_state.edit_prompt_ready = True
+                    st.session_state.edit_add_safe_margins = False
+                    st.success("Edit prompt prepared. Refine it below, then run the edit when ready.")
+
+        if st.session_state.get("edit_prompt_ready"):
+            staged_count = len(st.session_state.edit_images_bytes)
+            st.markdown("### Step 2 · Refine & Run the Edit")
+            st.caption(f"{staged_count} image{'s' if staged_count != 1 else ''} staged for Seedream edit.")
+
+            if "edit_prompt_editor_ready" not in st.session_state:
+                st.session_state.edit_prompt_editor_ready = st.session_state.editable_edit_prompt
+
+            edited_prompt = st.text_area(
+                "Enhanced Edit Prompt (editable):",
+                key="edit_prompt_editor_ready",
+                height=180
+            )
+
+            if edited_prompt != st.session_state.editable_edit_prompt:
+                st.session_state.editable_edit_prompt = edited_prompt
+                st.session_state.edit_prompt_edited = edited_prompt.strip() != st.session_state.edit_original_prompt_for_reset.strip()
+
+            action_cols = st.columns([1, 1, 2])
+            with action_cols[0]:
+                if st.button("🔄 Reset Prompt", key="reset_edit_prompt_ready", use_container_width=True):
+                    st.session_state.editable_edit_prompt = st.session_state.edit_original_prompt_for_reset
+                    st.session_state.edit_prompt_editor_ready = st.session_state.edit_original_prompt_for_reset
+                    st.session_state.edit_prompt_edited = False
+                    st.experimental_rerun()
+            with action_cols[1]:
+                st.caption("Use advanced options to adjust margins, cropping, and strength.")
+
+            with st.expander("Advanced edit options", expanded=False):
+                safe_margin_toggle = st.checkbox(
+                    "Add 'safe margins' note to prompt",
+                    value=st.session_state.edit_add_safe_margins,
+                    key="edit_safe_margins_toggle"
+                )
+                prevent_cropping_toggle = st.checkbox(
+                    "Prevent cropping (AI expand to 16:9)",
+                    value=st.session_state.edit_prevent_cropping,
+                    key="edit_prevent_cropping_toggle"
+                )
+                force_landscape_toggle = st.checkbox(
+                    "Force landscape 16:9 after edit",
+                    value=st.session_state.edit_force_169,
+                    key="edit_force_169_toggle"
+                )
+                strength_value = st.slider(
+                    "Edit strength (lower = subtle, higher = stronger)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=st.session_state.edit_strength,
+                    step=0.05,
+                    key="edit_strength_slider"
+                )
+
+            st.session_state.edit_add_safe_margins = safe_margin_toggle
+            st.session_state.edit_prevent_cropping = prevent_cropping_toggle
+            st.session_state.edit_force_169 = force_landscape_toggle
+            st.session_state.edit_strength = strength_value
+
+            st.session_state.edit_alt_text_value = st.text_input(
+                "Alt text for edited image:",
+                value=st.session_state.edit_alt_text_value,
+                key="edit_alt_text_ready"
+            )
+
+            with action_cols[2]:
+                run_edit_now = st.button("🚀 Run Edit", key="run_edit_now", use_container_width=True, type="primary")
+
+            if run_edit_now:
+                images_list = st.session_state.edit_images_bytes
+                if not images_list:
+                    st.warning("No base images staged. Prepare the edit again.")
+                else:
+                    final_edit_prompt = st.session_state.editable_edit_prompt.strip()
+                    if st.session_state.edit_add_safe_margins and final_edit_prompt:
                         final_edit_prompt = f"{final_edit_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
-                    with st.expander("Show final edit prompt sent to Seedream", expanded=True):
-                        st.code(final_edit_prompt, language="markdown")
 
-                    images_list: list[bytes] = []
-                    # Prefer explicitly staged bytes from Generate tab as first image
-                    if use_current_generated and st.session_state.pending_edit_bytes:
-                        images_list.append(st.session_state.pending_edit_bytes)
-                    elif use_current_generated and st.session_state.active_image_bytes_io:
-                        try:
-                            st.session_state.active_image_bytes_io.seek(0)
-                            images_list.append(st.session_state.active_image_bytes_io.getvalue())
-                        except Exception:
-                            pass
-                    # Add uploaded files (in order) until we have at most 4
-                    for f in [img1_file, img2_file, img3_file, img4_file]:
-                        if f and len(images_list) < 4:
-                            images_list.append(f.getvalue())
+                    with st.spinner("Running Seedream v4 edit..."):
+                        out_bytes = edit_image_fal_seedream(images_list, final_edit_prompt, strength=st.session_state.edit_strength)
 
-                    if not images_list:
-                        st.warning("No base image available. Either check the 'Use generated image' option or upload 1–4 images.")
+                    if out_bytes:
+                        needs_outpaint_edit = st.session_state.edit_prevent_cropping and fal_available and not _is_near_aspect_ratio(out_bytes)
+                        if needs_outpaint_edit:
+                            with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
+                                expanded = ensure_16x9_via_fal_edit(out_bytes, context_prompt=final_edit_prompt, width=1280, height=720, strength=0.35)
+                                if expanded:
+                                    out_bytes = expanded
+                                else:
+                                    st.info("16:9 expansion failed; proceeding without it.")
+
+                        processed = process_image_for_wordpress(
+                            out_bytes,
+                            force_landscape_16_9=st.session_state.edit_force_169,
+                            crop_strategy='crop'
+                        )
+
+                        if processed:
+                            st.session_state.active_image_bytes_io = processed
+                            st.session_state.active_image_alt_text = st.session_state.edit_alt_text_value
+                            st.session_state.pending_edit_bytes = None
+                            st.success("✅ Edit finished and ready for WordPress upload.")
+                        else:
+                            st.error("Failed to process the edited image.")
                     else:
-                        with st.spinner("Running Seedream v4 edit..."):
-                            out_bytes = edit_image_fal_seedream(images_list, final_edit_prompt, strength=strength)
-                        if out_bytes:
-                            # Expand to exact 16:9 using Seedream edit when requested
-                            if out_bytes and prevent_cropping_edit and fal_available:
-                                with st.spinner("Expanding canvas to 16:9 (AI outpaint)..."):
-                                    expanded = ensure_16x9_via_fal_edit(out_bytes, context_prompt=final_edit_prompt, width=1280, height=720, strength=0.35)
-                                    if expanded:
-                                        out_bytes = expanded
-                                    else:
-                                        st.info("16:9 expansion failed; proceeding without it.")
-                            processed = process_image_for_wordpress(
-                                out_bytes,
-                                force_landscape_16_9=make_16x9,
-                                crop_strategy='crop'
-                            )
-                            if processed:
-                                st.session_state.active_image_bytes_io = processed
-                                st.session_state.active_image_alt_text = alt_text_edit
-                                st.session_state.pending_edit_bytes = None  # clear staging after success
-                                st.success("✅ Edit finished and ready for upload.")
-                            else:
-                                st.error("Failed to process edited image.")
+                        st.error("Seedream did not return an edited image. Try adjusting the prompt or strength.")
 
     # =========================
     # TAB 3: UPLOAD YOUR OWN
