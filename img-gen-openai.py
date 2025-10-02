@@ -571,10 +571,18 @@ def generate_image_fal_seedream(prompt, width=1536, height=864):
         st.error(f"Error calling FAL Seedream v4: {e}")
         return None
 
-def edit_image_fal_seedream(image_bytes_list: list[bytes], prompt: str, strength: float = 0.6):
+def edit_image_fal_seedream(image_bytes_list: list[bytes], prompt: str, strength: float = 0.6, preserve_subject_lighting: bool = False, negative_prompt: str = "", image_size: dict | None = None):
     """
     Seedream v4 edit supports multiple images via `image_urls` (up to 4).
     Pass 1–4 images as bytes; we convert to data URLs and send them in order.
+    
+    Args:
+        image_bytes_list: List of image bytes to edit/compose (1-4 images)
+        prompt: Edit/composition instructions
+        strength: Edit strength (0.0-1.0); lower preserves more of original
+        preserve_subject_lighting: If True, adds instructions to maintain subject brightness/vibrancy
+        negative_prompt: Negative prompt to avoid unwanted characteristics
+        image_size: Optional dict with 'width' and 'height' keys (e.g., {"width": 3840, "height": 2160})
     """
     try:
         if not image_bytes_list:
@@ -584,15 +592,39 @@ def edit_image_fal_seedream(image_bytes_list: list[bytes], prompt: str, strength
             return f"data:{mime};base64," + base64.b64encode(b).decode("utf-8")
 
         urls = [to_data_url(b) for b in image_bytes_list[:4]]
+        
+        # Enhance prompt to preserve subject lighting if requested
+        final_prompt = prompt
+        final_negative_prompt = ""
+        
+        if preserve_subject_lighting:
+            final_prompt = (
+                f"{prompt.strip()} "
+                "The main subject should retain its bright, vibrant lighting and colors. "
+                "Keep the subject well-lit. "
+                "Maintain vivid colors on the subject."
+            )
+        
+        # Only add negative prompt if explicitly requested (separate from preserve_subject_lighting)
+        if negative_prompt:  # If user passed a custom negative prompt
+            final_negative_prompt = negative_prompt
 
         payload = {
-            "prompt": prompt,
+            "prompt": final_prompt,
             "image_urls": urls,                 # REQUIRED; list of up to 4
             "strength": max(0.0, min(1.0, float(strength))),
             "num_inference_steps": 28,
-            "guidance_scale": 4.0,
+            "guidance_scale": 4.0,  # FAL default - lower values allow more creative interpretation
             "num_samples": 1
         }
+        
+        # Add image size if specified (matches FAL playground behavior)
+        if image_size and isinstance(image_size, dict) and "width" in image_size and "height" in image_size:
+            payload["image_size"] = image_size
+        
+        # Add negative prompt if provided (Seedream 4.0 supports this)
+        if final_negative_prompt:
+            payload["negative_prompt"] = final_negative_prompt
 
         resp_json = _fal_post("fal-ai/bytedance/seedream/v4/edit", payload)
         img_bytes = _extract_image_bytes_from_fal(resp_json)
@@ -824,7 +856,13 @@ if 'edit_prompt_ready' not in st.session_state:
 if 'edit_images_bytes' not in st.session_state:
     st.session_state.edit_images_bytes = []
 if 'edit_strength' not in st.session_state:
-    st.session_state.edit_strength = 0.6
+    st.session_state.edit_strength = 0.35
+if 'edit_preserve_lighting' not in st.session_state:
+    st.session_state.edit_preserve_lighting = False  # Changed to False - let user opt-in
+if 'edit_use_negative_prompt' not in st.session_state:
+    st.session_state.edit_use_negative_prompt = False
+if 'edit_output_resolution' not in st.session_state:
+    st.session_state.edit_output_resolution = "3840x2160"  # Match FAL playground default
 if 'edit_force_169' not in st.session_state:
     st.session_state.edit_force_169 = True
 if 'edit_alt_text_value' not in st.session_state:
@@ -1234,13 +1272,37 @@ if fal_available or openai_available or openrouter_available:
                     max_value=1.0,
                     value=st.session_state.edit_strength,
                     step=0.05,
-                    key="edit_strength_slider"
+                    key="edit_strength_slider",
+                    help="For compositing bright subjects onto dark backgrounds, use 0.25-0.35. Higher values (0.6-0.8) allow more blending but may darken subjects."
+                )
+                preserve_lighting_toggle = st.checkbox(
+                    "Preserve subject brightness/lighting",
+                    value=st.session_state.edit_preserve_lighting,
+                    key="edit_preserve_lighting_toggle",
+                    help="Adds explicit instructions to maintain subject vibrancy. May make composition less natural. Try without this first."
+                )
+                use_negative_prompt_toggle = st.checkbox(
+                    "Use negative prompt (aggressive preservation)",
+                    value=st.session_state.edit_use_negative_prompt,
+                    key="edit_use_negative_prompt_toggle",
+                    help="Adds negative prompt to explicitly prevent darkening. Very strong - only enable if results are still too dark without it."
+                )
+                
+                output_resolution = st.selectbox(
+                    "Output resolution",
+                    ["3840x2160 (4K)", "1920x1080 (Full HD)", "1280x720 (HD)", "Auto (let model decide)"],
+                    index=0,
+                    key="edit_output_resolution_select",
+                    help="Higher resolution improves lighting detail and composition quality. FAL playground uses 4K by default."
                 )
 
             st.session_state.edit_add_safe_margins = safe_margin_toggle
             st.session_state.edit_prevent_cropping = prevent_cropping_toggle
             st.session_state.edit_force_169 = force_landscape_toggle
             st.session_state.edit_strength = strength_value
+            st.session_state.edit_preserve_lighting = preserve_lighting_toggle
+            st.session_state.edit_use_negative_prompt = use_negative_prompt_toggle
+            st.session_state.edit_output_resolution = output_resolution
 
             st.session_state.edit_alt_text_value = st.text_input(
                 "Alt text for edited image:",
@@ -1261,7 +1323,30 @@ if fal_available or openai_available or openrouter_available:
                         final_edit_prompt = f"{final_edit_prompt.rstrip('.')}. Compose with generous headroom and side margins; keep the main subject centered and clear of edges; suitable for 16:9 crops."
 
                     with st.spinner("Running Seedream v4 edit..."):
-                        out_bytes = edit_image_fal_seedream(images_list, final_edit_prompt, strength=st.session_state.edit_strength)
+                        # Build negative prompt only if explicitly enabled
+                        neg_prompt = ""
+                        if st.session_state.edit_use_negative_prompt:
+                            neg_prompt = "dark face, dull face, underexposed subject, dim lighting on subject, muddy colors, loss of vibrancy, shadowy face"
+                        
+                        # Parse resolution setting
+                        img_size = None
+                        res_str = st.session_state.edit_output_resolution
+                        if "3840x2160" in res_str:
+                            img_size = {"width": 3840, "height": 2160}
+                        elif "1920x1080" in res_str:
+                            img_size = {"width": 1920, "height": 1080}
+                        elif "1280x720" in res_str:
+                            img_size = {"width": 1280, "height": 720}
+                        # else: None = let model decide
+                        
+                        out_bytes = edit_image_fal_seedream(
+                            images_list, 
+                            final_edit_prompt, 
+                            strength=st.session_state.edit_strength,
+                            preserve_subject_lighting=st.session_state.edit_preserve_lighting,
+                            negative_prompt=neg_prompt,
+                            image_size=img_size
+                        )
 
                     if out_bytes:
                         needs_outpaint_edit = st.session_state.edit_prevent_cropping and fal_available and not _is_near_aspect_ratio(out_bytes)
