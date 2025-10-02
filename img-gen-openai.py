@@ -233,7 +233,7 @@ def process_image_for_wordpress(image_bytes, final_quality=80, force_landscape_1
 
 
 # ========================================
-# --- Providers: FAL (Seedream v4), OpenAI, OpenRouter
+# --- Providers: FAL (Seedream v4, Imagen 4 Preview), OpenAI, OpenRouter
 # ========================================
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -389,7 +389,7 @@ def generate_filename_from_slug(slug: str, ext: str = "jpg") -> str:
 
 # ---------- Thai-aware prompt engineering system prompt ----------
 IMAGE_ENGINEER_SYSTEM = (
-    "You are a prompt engineer specialized in ByteDance/Seedream v4 image generation. Your prompts result in stunning, high-quality visuals that capture attentions and clicks."
+    "You are a prompt engineer specialized in image prompt generation. Your prompts result in stunning, high-quality visuals that capture attentions and clicks."
     "Transform the user's request (Thai or English) into a single English prompt optimized for Seedream v4. "
     "Follow Seedream best practices: be concise but specific; clearly state subject(s), attributes, actions, setting, composition, camera/shot type, lens/focal length, lighting, atmosphere, color palette, materials/textures, and style (photographic/illustration/3D). "
     "\n\n"
@@ -403,7 +403,6 @@ IMAGE_ENGINEER_SYSTEM = (
     "- ATMOSPHERE: Describe environmental effects (volumetric fog, light rays, particle effects, atmospheric haze)\n"
     "\n"
     "Prefer natural, realistic renderings with professional photography quality unless the user asks for stylization. "
-    "Avoid on-image text, watermarks, UI, logos. Do NOT add brand names unless provided by the user. "
     "When the user implies an editorial/crypto news illustration, emphasize cinematic lighting, metallic/glass materials, and teal-orange color grading for modern financial aesthetics. "
     "If the user asks in Thai, translate faithfully to English while enriching with these cinematic visual details. "
     "Output: ONE paragraph in English only, no lists, no extra commentary."
@@ -579,6 +578,53 @@ def generate_image_fal_seedream(prompt, width=1536, height=864):
         return img_bytes
     except Exception as e:
         st.error(f"Error calling FAL Seedream v4: {e}")
+        return None
+
+
+def generate_image_fal_imagen4_preview(prompt, width=1536, height=1024):
+    """
+    Generate image using FAL Imagen 4 (Preview).
+    Tries the same payload shape as Seedream (prompt + image_size object).
+    Returns image bytes or None if failed.
+    """
+    try:
+        # Attempt 1: image_size object (preferred by many FAL pipelines)
+        attempts = []
+        attempts.append({
+            "prompt": prompt,
+            "image_size": {"width": int(width), "height": int(height)}
+        })
+        # Attempt 2: explicit width/height
+        attempts.append({
+            "prompt": prompt,
+            "width": int(width),
+            "height": int(height)
+        })
+        # Attempt 3: size string
+        attempts.append({
+            "prompt": prompt,
+            "size": f"{int(width)}x{int(height)}"
+        })
+
+        last_error = None
+        for payload in attempts:
+            try:
+                resp_json = _fal_post("fal-ai/imagen4/preview", payload)
+                img_bytes = _extract_image_bytes_from_fal(resp_json)
+                if img_bytes:
+                    return img_bytes
+                # If no bytes but no exception, continue to next shape
+            except Exception as inner_e:
+                last_error = inner_e
+                continue
+
+        if last_error:
+            st.error(f"Error calling FAL Imagen 4 (Preview): {last_error}")
+        else:
+            st.error("No image data received from FAL Imagen 4 (Preview).")
+        return None
+    except Exception as e:
+        st.error(f"Error calling FAL Imagen 4 (Preview): {e}")
         return None
 
 def edit_image_fal_seedream(image_bytes_list: list[bytes], prompt: str, strength: float = 0.6, preserve_subject_lighting: bool = False, negative_prompt: str = "", image_size: dict | None = None):
@@ -925,6 +971,7 @@ if fal_available or openai_available or openrouter_available:
         provider_options: list[str] = []
         if fal_available:
             provider_options.append("FAL Seedream v4 ($0.03 per image)")
+            provider_options.append("FAL Imagen 4 (Preview)")
         if openrouter_available:
             provider_options.append("OpenRouter ($0.03 per image)")
         if openai_available:
@@ -1083,10 +1130,14 @@ if fal_available or openai_available or openrouter_available:
                         image_bytes_from_api = None
                         provider_choice = selected_provider or ""
 
-                        if provider_choice.startswith("FAL") and fal_available:
+                        if fal_available and ("Seedream" in provider_choice):
                             st.session_state.last_used_provider = "FAL Seedream v4"
                             with st.spinner("Generating image with FAL Seedream v4..."):
                                 image_bytes_from_api = generate_image_fal_seedream(final_prompt, width=1536, height=1024)
+                        elif fal_available and ("Imagen 4" in provider_choice):
+                            st.session_state.last_used_provider = "FAL Imagen 4 (Preview)"
+                            with st.spinner("Generating image with FAL Imagen 4 (Preview)..."):
+                                image_bytes_from_api = generate_image_fal_imagen4_preview(final_prompt, width=1536, height=1024)
                         elif provider_choice.startswith("OpenRouter") and openrouter_available:
                             st.session_state.last_used_provider = "OpenRouter"
                             with st.spinner("Generating image with OpenRouter (Gemini 2.5 Flash Image)..."):
