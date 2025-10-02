@@ -388,14 +388,24 @@ def generate_filename_from_slug(slug: str, ext: str = "jpg") -> str:
     return f"{slug}-{date_str}-{short_hash}.{ext}"
 
 # ---------- Thai-aware prompt engineering system prompt ----------
-FLUX_ENGINEER_SYSTEM = (
-    "You are a prompt engineer specialized in ByteDance/Seedream v4 image generation. "
+IMAGE_ENGINEER_SYSTEM = (
+    "You are a prompt engineer specialized in ByteDance/Seedream v4 image generation. Your prompts result in stunning, high-quality visuals that capture attentions and clicks."
     "Transform the user's request (Thai or English) into a single English prompt optimized for Seedream v4. "
     "Follow Seedream best practices: be concise but specific; clearly state subject(s), attributes, actions, setting, composition, camera/shot type, lens/focal length, lighting, atmosphere, color palette, materials/textures, and style (photographic/illustration/3D). "
-    "Prefer natural, realistic renderings unless the user asks for stylization. "
+    "\n\n"
+    "CRITICAL QUALITY ENHANCEMENTS - Always add these elements for professional, cinematic results:\n"
+    "- LIGHTING: Specify dramatic, volumetric, or studio lighting with bloom effects, lens flares, and natural light rays where appropriate\n"
+    "- COLOR GRADING: Add cinematic color palettes (teal and orange, blue and gold, warm sunset tones) for visual impact\n"
+    "- MATERIALS & TEXTURES: Describe photorealistic materials (metallic surfaces with reflections, glass with refraction, water with caustics, fabric textures)\n"
+    "- DEPTH & FOCUS: Include shallow depth of field with bokeh for professional photography look (e.g., 'f/1.8 aperture', 'cinematic bokeh')\n"
+    "- DYNAMIC RANGE: Add 'HDR', 'high contrast', 'rich shadows', 'vibrant highlights' for premium quality\n"
+    "- RESOLUTION & DETAIL: Mention '8K', 'ultra detailed', 'hyperrealistic textures', 'sharp focus'\n"
+    "- ATMOSPHERE: Describe environmental effects (volumetric fog, light rays, particle effects, atmospheric haze)\n"
+    "\n"
+    "Prefer natural, realistic renderings with professional photography quality unless the user asks for stylization. "
     "Avoid on-image text, watermarks, UI, logos. Do NOT add brand names unless provided by the user. "
-    "When the user implies an editorial/crypto news illustration, prefer impactful but realistic scenes. "
-    "If the user asks in Thai, translate faithfully to English while adding missing visual details. "
+    "When the user implies an editorial/crypto news illustration, emphasize cinematic lighting, metallic/glass materials, and teal-orange color grading for modern financial aesthetics. "
+    "If the user asks in Thai, translate faithfully to English while enriching with these cinematic visual details. "
     "Output: ONE paragraph in English only, no lists, no extra commentary."
 )
 
@@ -415,7 +425,7 @@ def enhance_prompt_with_role(user_prompt: str) -> str:
                 model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
                 temperature=0.2,
                 messages=[
-                    {"role": "system", "content": FLUX_ENGINEER_SYSTEM},
+                    {"role": "system", "content": IMAGE_ENGINEER_SYSTEM},
                     {"role": "user", "content": user_prompt.strip()}
                 ],
             )
@@ -430,7 +440,7 @@ def enhance_prompt_with_role(user_prompt: str) -> str:
                 "model": os.getenv("OPENROUTER_TEXT_MODEL", "openai/gpt-4o-mini"),
                 "temperature": 0.2,
                 "messages": [
-                    {"role": "system", "content": FLUX_ENGINEER_SYSTEM},
+                    {"role": "system", "content": IMAGE_ENGINEER_SYSTEM},
                     {"role": "user", "content": user_prompt.strip()}
                 ],
             }
