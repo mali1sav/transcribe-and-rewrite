@@ -435,14 +435,27 @@ def _build_external_drop_component(component_key: str = "external-drop"):
         </div>
         <input type="file" id="{component_id}-file" accept="image/*" style="display:none" />
         <script>
-            const getStreamlit = () => window.parent?.Streamlit || window.Streamlit || null;
-            const Streamlit = getStreamlit();
+            const resolveStreamlit = () => {{
+                const candidates = [
+                    window.parent?.Streamlit,
+                    window.Streamlit,
+                    window.parent?.parent?.Streamlit,
+                ];
+                for (const candidate of candidates) {{
+                    if (candidate && typeof candidate.setComponentValue === 'function') {{
+                        return candidate;
+                    }}
+                }}
+                return null;
+            }};
+
             const doc = window.document;
             const dropZone = doc.getElementById('{component_id}-drop');
             const fileInput = doc.getElementById('{component_id}-file');
 
             const sendPayload = (payload) => {{
-                if (!Streamlit || !Streamlit.setComponentValue) {{
+                const Streamlit = resolveStreamlit();
+                if (!Streamlit || typeof Streamlit.setComponentValue !== 'function') {{
                     return;
                 }}
                 Streamlit.setComponentValue(JSON.stringify(payload));
@@ -527,16 +540,22 @@ def _build_external_drop_component(component_key: str = "external-drop"):
 
                 dropZone.addEventListener('dragover', (event) => {{
                     event.preventDefault();
+                    event.stopPropagation();
                     if (event.dataTransfer) {{
                         event.dataTransfer.dropEffect = 'copy';
                     }}
                     dropZone.classList.add('dragover');
                 }});
 
-                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+                dropZone.addEventListener('dragleave', (event) => {{
+                    event.preventDefault();
+                    event.stopPropagation();
+                    dropZone.classList.remove('dragover');
+                }});
 
                 dropZone.addEventListener('drop', async (event) => {{
                     event.preventDefault();
+                    event.stopPropagation();
                     dropZone.classList.remove('dragover');
 
                     const dt = event.dataTransfer;
@@ -573,10 +592,19 @@ def _build_external_drop_component(component_key: str = "external-drop"):
                 }});
             }}
 
-            if (Streamlit && Streamlit.setComponentReady) {{
-                Streamlit.setComponentReady();
-                Streamlit.setFrameHeight(190);
-            }}
+            const markReady = () => {{
+                const Streamlit = resolveStreamlit();
+                if (Streamlit && typeof Streamlit.setComponentReady === 'function') {{
+                    Streamlit.setComponentReady();
+                    if (typeof Streamlit.setFrameHeight === 'function') {{
+                        Streamlit.setFrameHeight(190);
+                    }}
+                }} else {{
+                    setTimeout(markReady, 50);
+                }}
+            }};
+
+            markReady();
         </script>
     """
     return components.html(drop_component, height=200, key=component_key)
