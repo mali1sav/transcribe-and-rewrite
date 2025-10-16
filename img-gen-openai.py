@@ -11,6 +11,8 @@ import json
 import re
 import time
 import hashlib
+from urllib.parse import urlparse, unquote
+import streamlit.components.v1 as components
 
 # Load environment variables from .env file
 load_dotenv()
@@ -386,6 +388,198 @@ def generate_filename_from_slug(slug: str, ext: str = "jpg") -> str:
     date_str = time.strftime("%d-%m-%Y")
     short_hash = hashlib.md5(slug.encode("utf-8")).hexdigest()[:6]
     return f"{slug}-{date_str}-{short_hash}.{ext}"
+
+
+def _filename_from_url(url: str) -> str:
+    """Best-effort filename extraction from a remote image URL."""
+    parsed = urlparse(url)
+    if not parsed.path:
+        return "dropped-image"
+    candidate = os.path.basename(parsed.path)
+    candidate = unquote(candidate)
+    if not candidate:
+        return "dropped-image"
+    return candidate.split("?")[0] or "dropped-image"
+
+
+def _build_external_drop_component(component_key: str = "external-drop"):
+    """Render a custom drop zone capable of receiving browser-dragged remote images."""
+    component_id = component_key.replace(" ", "-")
+    drop_component = f"""
+        <style>
+            .external-drop-zone {{
+                border: 2px dashed var(--secondary-color, #e0e0e0);
+                border-radius: 10px;
+                padding: 1.5rem;
+                text-align: center;
+                color: var(--text-color, #555);
+                font-family: 'Source Sans Pro', sans-serif;
+                background-color: rgba(0, 0, 0, 0.02);
+                transition: border-color 0.2s ease, background-color 0.2s ease;
+                cursor: pointer;
+            }}
+            .external-drop-zone.dragover {{
+                border-color: #ff4b4b;
+                background-color: rgba(255, 75, 75, 0.08);
+                color: #ff4b4b;
+            }}
+            .external-drop-zone small {{
+                display: block;
+                margin-top: 0.5rem;
+                color: inherit;
+            }}
+        </style>
+        <div id="{component_id}-drop" class="external-drop-zone">
+            <strong>Drag an image from another tab or click to pick a file</strong>
+            <small>Images from other webpages will be fetched automatically.</small>
+        </div>
+        <input type="file" id="{component_id}-file" accept="image/*" style="display:none" />
+        <script>
+            const getStreamlit = () => window.parent?.Streamlit || window.Streamlit || null;
+            const Streamlit = getStreamlit();
+            const doc = window.document;
+            const dropZone = doc.getElementById('{component_id}-drop');
+            const fileInput = doc.getElementById('{component_id}-file');
+
+            const sendPayload = (payload) => {{
+                if (!Streamlit || !Streamlit.setComponentValue) {{
+                    return;
+                }}
+                Streamlit.setComponentValue(JSON.stringify(payload));
+            }};
+
+            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {{
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (err) => reject(err);
+                reader.readAsDataURL(file);
+            }});
+
+            const handleFile = async (file) => {{
+                if (!file) return;
+                try {{
+                    const dataUrl = await readFileAsDataUrl(file);
+                    const base64 = dataUrl.split(',')[1];
+                    sendPayload({{
+                        kind: 'file',
+                        name: file.name,
+                        type: file.type,
+                        data: base64,
+                        lastModified: file.lastModified || null
+                    }});
+                }} catch (err) {{
+                    sendPayload({{ kind: 'error', message: 'Unable to read dropped file.' }});
+                }}
+            }};
+
+            const extractUrlFromHtml = (html) => {{
+                if (!html) return '';
+                const match = html.match(/<img[^>]+src\s*=\s*"([^"]+)"/i) || html.match(/<img[^>]+src\s*=\s*'([^']+)'/i);
+                if (match && match[1]) return match[1];
+                const background = html.match(/url\((['"]?)(.*?)\1\)/i);
+                if (background && background[2]) return background[2];
+                return '';
+            }};
+
+            const resolveStringItems = async (items) => {{
+                const strings = await Promise.all(Array.from(items || []).filter((item) => item.kind === 'string').map((item) => new Promise((resolve) => {{
+                    try {{
+                        item.getAsString((data) => resolve({{ type: item.type, data }}));
+                    }} catch (err) {{
+                        resolve(null);
+                    }}
+                }})));
+                return strings.filter(Boolean);
+            }};
+
+            const findDroppedUrl = async (dt) => {{
+                let url = dt.getData('text/uri-list') || dt.getData('text/plain');
+                const htmlData = dt.getData('text/html');
+                if (!url && htmlData) {{
+                    url = extractUrlFromHtml(htmlData);
+                }}
+
+                if (url) return url.trim();
+
+                const resolved = await resolveStringItems(dt.items);
+                for (const entry of resolved) {{
+                    if (entry.type === 'text/uri-list' && entry.data) return entry.data.split('\n')[0].trim();
+                }}
+                for (const entry of resolved) {{
+                    if (entry.type === 'text/html' && entry.data) {{
+                        const candidate = extractUrlFromHtml(entry.data);
+                        if (candidate) return candidate;
+                    }}
+                }}
+                for (const entry of resolved) {{
+                    if (entry.data) {{
+                        const maybeUrl = entry.data.trim();
+                        if (maybeUrl.startsWith('http')) return maybeUrl;
+                    }}
+                }}
+                return '';
+            }};
+
+            if (dropZone && !dropZone.dataset.bound) {{
+                dropZone.dataset.bound = 'true';
+
+                dropZone.addEventListener('click', () => fileInput && fileInput.click());
+
+                dropZone.addEventListener('dragover', (event) => {{
+                    event.preventDefault();
+                    if (event.dataTransfer) {{
+                        event.dataTransfer.dropEffect = 'copy';
+                    }}
+                    dropZone.classList.add('dragover');
+                }});
+
+                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+
+                dropZone.addEventListener('drop', async (event) => {{
+                    event.preventDefault();
+                    dropZone.classList.remove('dragover');
+
+                    const dt = event.dataTransfer;
+                    if (!dt) return;
+
+                    const fileItem = Array.from(dt.items || []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+                    if (fileItem) {{
+                        const file = fileItem.getAsFile();
+                        if (file) {{
+                            await handleFile(file);
+                            return;
+                        }}
+                    }}
+
+                    if (dt.files && dt.files.length > 0) {{
+                        await handleFile(dt.files[0]);
+                        return;
+                    }}
+
+                    const url = await findDroppedUrl(dt);
+                    if (url) {{
+                        sendPayload({{ kind: 'url', url }});
+                    }} else {{
+                        sendPayload({{ kind: 'error', message: 'Unable to detect an image from the drop event.' }});
+                    }}
+                }});
+
+                fileInput && fileInput.addEventListener('change', async (event) => {{
+                    const files = event.target.files;
+                    if (files && files.length > 0) {{
+                        await handleFile(files[0]);
+                        event.target.value = '';
+                    }}
+                }});
+            }}
+
+            if (Streamlit && Streamlit.setComponentReady) {{
+                Streamlit.setComponentReady();
+                Streamlit.setFrameHeight(190);
+            }}
+        </script>
+    """
+    return components.html(drop_component, height=200, key=component_key)
 
 # ---------- Thai-aware prompt engineering system prompt ----------
 IMAGE_ENGINEER_SYSTEM = (
@@ -945,6 +1139,16 @@ if 'add_safe_margins' not in st.session_state:
     st.session_state.add_safe_margins = False
 if 'prevent_cropping' not in st.session_state:
     st.session_state.prevent_cropping = True
+if 'external_drop_bytes' not in st.session_state:
+    st.session_state.external_drop_bytes = None
+if 'external_drop_name' not in st.session_state:
+    st.session_state.external_drop_name = ""
+if 'external_drop_source' not in st.session_state:
+    st.session_state.external_drop_source = ""
+if 'external_drop_token' not in st.session_state:
+    st.session_state.external_drop_token = ""
+if 'external_drop_error' not in st.session_state:
+    st.session_state.external_drop_error = ""
 
 st.title("AI Image Generator & WordPress Uploader")
 
@@ -1440,21 +1644,136 @@ if fal_available or openai_available or openrouter_available:
     # =========================
     with tab_upload:
         st.markdown("--- _Or Upload Your Own Image_ ---")
+
+        drop_payload_raw = _build_external_drop_component("user-upload-drop")
+        drop_payload = None
+        if drop_payload_raw:
+            if isinstance(drop_payload_raw, str):
+                try:
+                    drop_payload = json.loads(drop_payload_raw)
+                except json.JSONDecodeError:
+                    drop_payload = None
+            elif isinstance(drop_payload_raw, dict):
+                drop_payload = drop_payload_raw
+
+        if isinstance(drop_payload, dict):
+            kind = drop_payload.get("kind")
+            token_value = ""
+            if kind == "file":
+                data_b64 = drop_payload.get("data")
+                token_value = f"file:{drop_payload.get('name', '')}:{drop_payload.get('lastModified', '')}:{len(data_b64 or '')}"
+                if data_b64 and token_value != st.session_state.external_drop_token:
+                    try:
+                        raw_bytes = base64.b64decode(data_b64)
+                    except Exception:
+                        st.session_state.external_drop_error = "Dropped file could not be decoded as an image."
+                        st.session_state.external_drop_token = token_value
+                    else:
+                        st.session_state.external_drop_bytes = raw_bytes
+                        st.session_state.external_drop_name = drop_payload.get("name") or "dropped-image"
+                        st.session_state.external_drop_source = "Drag-and-drop file"
+                        st.session_state.external_drop_token = token_value
+                        st.session_state.external_drop_error = ""
+                        st.success(f"Image '{st.session_state.external_drop_name}' staged from drag-and-drop.")
+            elif kind == "url":
+                url = (drop_payload.get("url") or "").strip()
+                token_value = f"url:{url}"
+                if url and token_value != st.session_state.external_drop_token:
+                    try:
+                        if url.startswith("data:image"):
+                            header, data_part = url.split(",", 1)
+                            raw_bytes = base64.b64decode(data_part)
+                            mime = header.split(";")[0].split(":")[1] if ":" in header else "image/png"
+                            ext = mime.split("/")[-1] if "/" in mime else "png"
+                            filename_guess = f"dropped-image.{ext}" if ext else "dropped-image"
+                        else:
+                            headers = {"User-Agent": "Mozilla/5.0 (compatible; Streamlit-Drop/1.0)"}
+                            response = requests.get(url, timeout=15, headers=headers)
+                            response.raise_for_status()
+                            content_type = response.headers.get("Content-Type", "")
+                            if "image" not in content_type.lower():
+                                raise ValueError("Dropped URL does not point to an image.")
+                            content_length = response.headers.get("Content-Length")
+                            max_remote_size = 15 * 1024 * 1024
+                            if content_length:
+                                try:
+                                    if int(content_length) > max_remote_size:
+                                        raise ValueError("Dropped image is larger than 15MB.")
+                                except ValueError:
+                                    pass
+                            raw_bytes = response.content
+                            if len(raw_bytes) > max_remote_size:
+                                raise ValueError("Dropped image is larger than 15MB.")
+                            if not raw_bytes:
+                                raise ValueError("Dropped image returned no data.")
+                            filename_guess = _filename_from_url(url)
+                            if "." not in filename_guess:
+                                ext = content_type.split("/")[-1].split(";")[0] if "/" in content_type else "jpg"
+                                if ext and not filename_guess.lower().endswith(ext.lower()):
+                                    filename_guess = f"{filename_guess}.{ext}"
+                        st.session_state.external_drop_bytes = raw_bytes
+                        st.session_state.external_drop_name = filename_guess
+                        st.session_state.external_drop_source = url
+                        st.session_state.external_drop_token = token_value
+                        st.session_state.external_drop_error = ""
+                        st.success("Image fetched from dropped URL.")
+                    except Exception as drop_err:
+                        message = str(drop_err) or "Unknown error"
+                        st.session_state.external_drop_error = f"Failed to fetch dropped image: {message}"
+                        st.session_state.external_drop_token = token_value
+                elif not url:
+                    st.session_state.external_drop_error = "Dropped item did not include an image URL."
+                    st.session_state.external_drop_token = token_value
+            elif kind == "error":
+                token_value = f"error:{drop_payload.get('message', '')}"
+                if token_value != st.session_state.external_drop_token:
+                    st.session_state.external_drop_error = drop_payload.get("message", "Unable to drop the image.")
+                    st.session_state.external_drop_token = token_value
+
+        if st.session_state.external_drop_error:
+            st.warning(st.session_state.external_drop_error)
+
+        if st.session_state.external_drop_bytes:
+            preview_col, clear_col = st.columns([4, 1])
+            with preview_col:
+                st.image(BytesIO(st.session_state.external_drop_bytes), caption=st.session_state.external_drop_name or "Dropped image", use_column_width=True)
+                if st.session_state.external_drop_source and not st.session_state.external_drop_source.startswith("Drag"):
+                    st.caption(f"Source: {st.session_state.external_drop_source}")
+            with clear_col:
+                if st.button("Clear drop", key="clear_external_drop"):
+                    st.session_state.external_drop_bytes = None
+                    st.session_state.external_drop_name = ""
+                    st.session_state.external_drop_source = ""
+                    st.session_state.external_drop_token = ""
+                    st.session_state.external_drop_error = ""
+                    st.experimental_rerun()
+
         with st.form("user_image_upload_form"):
-            uploaded_file = st.file_uploader("Choose an image file", type=['png', 'jpg', 'jpeg', 'webp'])
+            uploaded_file = st.file_uploader(
+                "Choose an image file",
+                type=['png', 'jpg', 'jpeg', 'webp'],
+                help="You can also drag an image from another tab into the drop zone above."
+            )
+            if uploaded_file is None and st.session_state.external_drop_bytes:
+                st.caption(f"Using dropped image: {st.session_state.external_drop_name or 'dropped image'}")
             user_alt_text = st.text_area("Enter alt text for your image:", height=80, key="user_alt_text_input_val")
             st.session_state.add_safe_margins = st.checkbox("Add 'safe margins' note to prompt", value=st.session_state.add_safe_margins)
             st.session_state.prevent_cropping = st.checkbox("Prevent cropping (AI expand to 16:9)", value=st.session_state.prevent_cropping)
             process_uploaded_button = st.form_submit_button("Process Uploaded Image")
 
-            if process_uploaded_button and uploaded_file is not None and user_alt_text.strip():
-                st.session_state.user_uploaded_raw_bytes = uploaded_file.getvalue()
+            selected_bytes = None
+            if uploaded_file is not None:
+                selected_bytes = uploaded_file.getvalue()
+            elif st.session_state.external_drop_bytes:
+                selected_bytes = st.session_state.external_drop_bytes
+
+            if process_uploaded_button and selected_bytes is not None and user_alt_text.strip():
+                st.session_state.user_uploaded_raw_bytes = selected_bytes
                 st.session_state.user_uploaded_alt_text_input = user_alt_text
 
-                raw_bytes = st.session_state.user_uploaded_raw_bytes
                 with st.spinner("Processing your uploaded image..."):
                     processed_user_image_io = process_image_for_wordpress(
-                        raw_bytes,
+                        selected_bytes,
                         crop_strategy='crop',
                         force_landscape_16_9=False
                     )
@@ -1466,8 +1785,8 @@ if fal_available or openai_available or openrouter_available:
                         st.error("Failed to process your uploaded image.")
                         st.session_state.active_image_bytes_io = None
                         st.session_state.active_image_alt_text = None
-            elif process_uploaded_button and (uploaded_file is None or not user_alt_text.strip()):
-                st.warning("Please upload an image AND provide alt text before processing.")
+            elif process_uploaded_button and (selected_bytes is None or not user_alt_text.strip()):
+                st.warning("Please upload or drop an image AND provide alt text before processing.")
 
 # ------------------------------------------------
 # --- UI: Display active image + Upload to WP
