@@ -607,7 +607,10 @@ def _build_external_drop_component(component_key: str = "external-drop"):
             markReady();
         </script>
     """
-    return components.html(drop_component, height=200, key=component_key)
+    # streamlit.components.v1.html does not support a ``key`` argument the way
+    # core Streamlit widgets do. Passing one causes a TypeError at runtime, so we
+    # rely on the internal element IDs instead for uniqueness.
+    return components.html(drop_component, height=200)
 
 # ---------- Thai-aware prompt engineering system prompt ----------
 IMAGE_ENGINEER_SYSTEM = (
