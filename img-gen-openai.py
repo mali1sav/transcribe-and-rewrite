@@ -435,61 +435,147 @@ def _build_external_drop_component(component_key: str = "external-drop"):
         </div>
         <input type="file" id="{component_id}-file" accept="image/*" style="display:none" />
         <script>
-            const Streamlit = window.parent.Streamlit;
+            const resolveStreamlit = () => {{
+                const candidates = [
+                    window.parent?.Streamlit,
+                    window.Streamlit,
+                    window.parent?.parent?.Streamlit,
+                ];
+                for (const candidate of candidates) {{
+                    if (candidate && typeof candidate.setComponentValue === 'function') {{
+                        return candidate;
+                    }}
+                }}
+                return null;
+            }};
+
             const doc = window.document;
             const dropZone = doc.getElementById('{component_id}-drop');
             const fileInput = doc.getElementById('{component_id}-file');
 
+            const sendPayload = (payload) => {{
+                const Streamlit = resolveStreamlit();
+                if (!Streamlit || typeof Streamlit.setComponentValue !== 'function') {{
+                    return;
+                }}
+                Streamlit.setComponentValue(JSON.stringify(payload));
+            }};
+
+            const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {{
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (err) => reject(err);
+                reader.readAsDataURL(file);
+            }});
+
+            const handleFile = async (file) => {{
+                if (!file) return;
+                try {{
+                    const dataUrl = await readFileAsDataUrl(file);
+                    const base64 = dataUrl.split(',')[1];
+                    sendPayload({{
+                        kind: 'file',
+                        name: file.name,
+                        type: file.type,
+                        data: base64,
+                        lastModified: file.lastModified || null
+                    }});
+                }} catch (err) {{
+                    sendPayload({{ kind: 'error', message: 'Unable to read dropped file.' }});
+                }}
+            }};
+
+            const extractUrlFromHtml = (html) => {{
+                if (!html) return '';
+                const match = html.match(/<img[^>]+src\s*=\s*"([^"]+)"/i) || html.match(/<img[^>]+src\s*=\s*'([^']+)'/i);
+                if (match && match[1]) return match[1];
+                const background = html.match(/url\((['"]?)(.*?)\1\)/i);
+                if (background && background[2]) return background[2];
+                return '';
+            }};
+
+            const resolveStringItems = async (items) => {{
+                const strings = await Promise.all(Array.from(items || []).filter((item) => item.kind === 'string').map((item) => new Promise((resolve) => {{
+                    try {{
+                        item.getAsString((data) => resolve({{ type: item.type, data }}));
+                    }} catch (err) {{
+                        resolve(null);
+                    }}
+                }})));
+                return strings.filter(Boolean);
+            }};
+
+            const findDroppedUrl = async (dt) => {{
+                let url = dt.getData('text/uri-list') || dt.getData('text/plain');
+                const htmlData = dt.getData('text/html');
+                if (!url && htmlData) {{
+                    url = extractUrlFromHtml(htmlData);
+                }}
+
+                if (url) return url.trim();
+
+                const resolved = await resolveStringItems(dt.items);
+                for (const entry of resolved) {{
+                    if (entry.type === 'text/uri-list' && entry.data) return entry.data.split('\n')[0].trim();
+                }}
+                for (const entry of resolved) {{
+                    if (entry.type === 'text/html' && entry.data) {{
+                        const candidate = extractUrlFromHtml(entry.data);
+                        if (candidate) return candidate;
+                    }}
+                }}
+                for (const entry of resolved) {{
+                    if (entry.data) {{
+                        const maybeUrl = entry.data.trim();
+                        if (maybeUrl.startsWith('http')) return maybeUrl;
+                    }}
+                }}
+                return '';
+            }};
+
             if (dropZone && !dropZone.dataset.bound) {{
                 dropZone.dataset.bound = 'true';
-
-                const sendPayload = (payload) => {{
-                    Streamlit.setComponentValue(JSON.stringify(payload));
-                }};
-
-                const handleFile = (file) => {{
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = () => {{
-                        const base64 = reader.result.split(',')[1];
-                        sendPayload({{
-                            kind: 'file',
-                            name: file.name,
-                            type: file.type,
-                            data: base64,
-                            lastModified: file.lastModified || null
-                        }});
-                    }};
-                    reader.readAsDataURL(file);
-                }};
 
                 dropZone.addEventListener('click', () => fileInput && fileInput.click());
 
                 dropZone.addEventListener('dragover', (event) => {{
                     event.preventDefault();
+                    event.stopPropagation();
+                    if (event.dataTransfer) {{
+                        event.dataTransfer.dropEffect = 'copy';
+                    }}
                     dropZone.classList.add('dragover');
                 }});
 
-                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+                dropZone.addEventListener('dragleave', (event) => {{
+                    event.preventDefault();
+                    event.stopPropagation();
+                    dropZone.classList.remove('dragover');
+                }});
 
                 dropZone.addEventListener('drop', async (event) => {{
                     event.preventDefault();
+                    event.stopPropagation();
                     dropZone.classList.remove('dragover');
-                    const dt = event.dataTransfer;
-                    if (dt.files && dt.files.length > 0) {{
-                        handleFile(dt.files[0]);
-                        return;
-                    }}
 
-                    const htmlData = dt.getData('text/html');
-                    let url = dt.getData('text/uri-list') || dt.getData('text/plain');
-                    if (htmlData) {{
-                        const match = htmlData.match(/src\s*=\s*"([^"]+)"/i) || htmlData.match(/src\s*=\s*'([^']+)'/i);
-                        if (match && match[1]) {{
-                            url = match[1];
+                    const dt = event.dataTransfer;
+                    if (!dt) return;
+
+                    const fileItem = Array.from(dt.items || []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+                    if (fileItem) {{
+                        const file = fileItem.getAsFile();
+                        if (file) {{
+                            await handleFile(file);
+                            return;
                         }}
                     }}
 
+                    if (dt.files && dt.files.length > 0) {{
+                        await handleFile(dt.files[0]);
+                        return;
+                    }}
+
+                    const url = await findDroppedUrl(dt);
                     if (url) {{
                         sendPayload({{ kind: 'url', url }});
                     }} else {{
@@ -497,20 +583,31 @@ def _build_external_drop_component(component_key: str = "external-drop"):
                     }}
                 }});
 
-                fileInput && fileInput.addEventListener('change', (event) => {{
+                fileInput && fileInput.addEventListener('change', async (event) => {{
                     const files = event.target.files;
                     if (files && files.length > 0) {{
-                        handleFile(files[0]);
+                        await handleFile(files[0]);
                         event.target.value = '';
                     }}
                 }});
             }}
 
-            Streamlit.setComponentReady();
-            Streamlit.setFrameHeight(190);
+            const markReady = () => {{
+                const Streamlit = resolveStreamlit();
+                if (Streamlit && typeof Streamlit.setComponentReady === 'function') {{
+                    Streamlit.setComponentReady();
+                    if (typeof Streamlit.setFrameHeight === 'function') {{
+                        Streamlit.setFrameHeight(190);
+                    }}
+                }} else {{
+                    setTimeout(markReady, 50);
+                }}
+            }};
+
+            markReady();
         </script>
     """
-    return components.html(drop_component, height=200)
+    return components.html(drop_component, height=200, key=component_key)
 
 # ---------- Thai-aware prompt engineering system prompt ----------
 IMAGE_ENGINEER_SYSTEM = (
